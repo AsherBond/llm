@@ -325,7 +325,7 @@ class Chat(Model):
                 stream=False,
                 **kwargs,
             )
-            response.response_json = remove_dict_none_values(completion.dict())
+            response.response_json = remove_dict_none_values(completion.model_dump())
             yield completion.choices[0].message.content
 
     def get_client(self):
@@ -339,8 +339,7 @@ class Chat(Model):
         if self.api_engine:
             kwargs["engine"] = self.api_engine
         if self.needs_key:
-            if self.key:
-                kwargs["api_key"] = self.key
+            kwargs["api_key"] = self.get_key()
         else:
             # OpenAI-compatible models don't need a key, but the
             # openai client library requires one
@@ -413,7 +412,7 @@ class Completion(Chat):
                 stream=False,
                 **kwargs,
             )
-            response.response_json = remove_dict_none_values(completion.dict())
+            response.response_json = remove_dict_none_values(completion.model_dump())
             yield completion.choices[0].text
 
 
