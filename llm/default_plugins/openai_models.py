@@ -33,8 +33,8 @@ def register_models(register):
     register(Chat("gpt-4-turbo-2024-04-09"))
     register(Chat("gpt-4-turbo"), aliases=("gpt-4-turbo-preview", "4-turbo", "4t"))
     # GPT-4o
-    register(Chat("gpt-4o"), aliases=("4o",))
-    register(Chat("gpt-4o-mini"), aliases=("4o-mini",))
+    register(Chat("gpt-4o", vision=True), aliases=("4o",))
+    register(Chat("gpt-4o-mini", vision=True), aliases=("4o-mini",))
     # o1
     register(Chat("o1-preview", can_stream=False, allows_system_prompt=False))
     register(Chat("o1-mini", can_stream=False, allows_system_prompt=False))
@@ -271,6 +271,7 @@ class Chat(Model):
         api_engine=None,
         headers=None,
         can_stream=True,
+        vision=False,
         allows_system_prompt=True,
     ):
         self.model_id = model_id
@@ -282,7 +283,16 @@ class Chat(Model):
         self.api_engine = api_engine
         self.headers = headers
         self.can_stream = can_stream
+        self.vision = vision
         self.allows_system_prompt = allows_system_prompt
+
+        if vision:
+            self.attachment_types = {
+                "image/png",
+                "image/jpeg",
+                "image/webp",
+                "image/gif",
+            }
 
     def __str__(self):
         return "OpenAI Chat: {}".format(self.model_id)
@@ -302,15 +312,41 @@ class Chat(Model):
                         {"role": "system", "content": prev_response.prompt.system}
                     )
                     current_system = prev_response.prompt.system
-                messages.append(
-                    {"role": "user", "content": prev_response.prompt.prompt}
-                )
+                if prev_response.attachments:
+                    attachment_message = [
+                        {"type": "text", "text": prev_response.prompt.prompt}
+                    ]
+                    for attachment in prev_response.attachments:
+                        url = attachment.url
+                        if not url:
+                            base64_image = attachment.base64_content()
+                            url = f"data:{attachment.resolve_type()};base64,{base64_image}"
+                        attachment_message.append(
+                            {"type": "image_url", "image_url": {"url": url}}
+                        )
+                    messages.append({"role": "user", "content": attachment_message})
+                else:
+                    messages.append(
+                        {"role": "user", "content": prev_response.prompt.prompt}
+                    )
                 messages.append({"role": "assistant", "content": prev_response.text()})
         if prompt.system and prompt.system != current_system:
             messages.append({"role": "system", "content": prompt.system})
-        messages.append({"role": "user", "content": prompt.prompt})
-        response._prompt_json = {"messages": messages}
-        kwargs = self.build_kwargs(prompt)
+        if not prompt.attachments:
+            messages.append({"role": "user", "content": prompt.prompt})
+        else:
+            attachment_message = [{"type": "text", "text": prompt.prompt}]
+            for attachment in prompt.attachments:
+                url = attachment.url
+                if not url:
+                    base64_image = attachment.base64_content()
+                    url = f"data:{attachment.resolve_type()};base64,{base64_image}"
+                attachment_message.append(
+                    {"type": "image_url", "image_url": {"url": url}}
+                )
+            messages.append({"role": "user", "content": attachment_message})
+
+        kwargs = self.build_kwargs(prompt, stream)
         client = self.get_client()
         if stream:
             completion = client.chat.completions.create(
@@ -322,7 +358,10 @@ class Chat(Model):
             chunks = []
             for chunk in completion:
                 chunks.append(chunk)
-                content = chunk.choices[0].delta.content
+                try:
+                    content = chunk.choices[0].delta.content
+                except IndexError:
+                    content = None
                 if content is not None:
                     yield content
             response.response_json = remove_dict_none_values(combine_chunks(chunks))
@@ -335,6 +374,7 @@ class Chat(Model):
             )
             response.response_json = remove_dict_none_values(completion.model_dump())
             yield completion.choices[0].message.content
+        response._prompt_json = redact_data_urls({"messages": messages})
 
     def get_client(self):
         kwargs = {}
@@ -358,13 +398,15 @@ class Chat(Model):
             kwargs["http_client"] = logging_client()
         return openai.OpenAI(**kwargs)
 
-    def build_kwargs(self, prompt):
+    def build_kwargs(self, prompt, stream):
         kwargs = dict(not_nulls(prompt.options))
         json_object = kwargs.pop("json_object", None)
         if "max_tokens" not in kwargs and self.default_max_tokens is not None:
             kwargs["max_tokens"] = self.default_max_tokens
         if json_object:
             kwargs["response_format"] = {"type": "json_object"}
+        if stream:
+            kwargs["stream_options"] = {"include_usage": True}
         return kwargs
 
 
@@ -394,8 +436,7 @@ class Completion(Chat):
                 messages.append(prev_response.prompt.prompt)
                 messages.append(prev_response.text())
         messages.append(prompt.prompt)
-        response._prompt_json = {"messages": messages}
-        kwargs = self.build_kwargs(prompt)
+        kwargs = self.build_kwargs(prompt, stream)
         client = self.get_client()
         if stream:
             completion = client.completions.create(
@@ -407,7 +448,10 @@ class Completion(Chat):
             chunks = []
             for chunk in completion:
                 chunks.append(chunk)
-                content = chunk.choices[0].text
+                try:
+                    content = chunk.choices[0].text
+                except IndexError:
+                    content = None
                 if content is not None:
                     yield content
             combined = combine_chunks(chunks)
@@ -422,6 +466,7 @@ class Completion(Chat):
             )
             response.response_json = remove_dict_none_values(completion.model_dump())
             yield completion.choices[0].text
+        response._prompt_json = redact_data_urls({"messages": messages})
 
 
 def not_nulls(data) -> dict:
@@ -435,8 +480,11 @@ def combine_chunks(chunks: List) -> dict:
     # If any of them have log probability, we're going to persist
     # those later on
     logprobs = []
+    usage = {}
 
     for item in chunks:
+        if item.usage:
+            usage = dict(item.usage)
         for choice in item.choices:
             if choice.logprobs and hasattr(choice.logprobs, "top_logprobs"):
                 logprobs.append(
@@ -460,6 +508,7 @@ def combine_chunks(chunks: List) -> dict:
         "content": content,
         "role": role,
         "finish_reason": finish_reason,
+        "usage": usage,
     }
     if logprobs:
         combined["logprobs"] = logprobs
@@ -469,3 +518,25 @@ def combine_chunks(chunks: List) -> dict:
             combined[key] = value
 
     return combined
+
+
+def redact_data_urls(input_dict):
+    """
+    Recursively search through the input dictionary for any 'image_url' keys
+    and modify the 'url' value to be just 'data:...'.
+    """
+    if isinstance(input_dict, dict):
+        for key, value in input_dict.items():
+            if (
+                key == "image_url"
+                and isinstance(value, dict)
+                and "url" in value
+                and value["url"].startswith("data:")
+            ):
+                value["url"] = "data:..."
+            else:
+                redact_data_urls(value)
+    elif isinstance(input_dict, list):
+        for item in input_dict:
+            redact_data_urls(item)
+    return input_dict

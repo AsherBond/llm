@@ -4,6 +4,7 @@ from .errors import (
     NeedsKeyException,
 )
 from .models import (
+    Attachment,
     Conversation,
     Model,
     ModelWithAliases,
@@ -28,6 +29,7 @@ __all__ = [
     "get_model",
     "get_key",
     "user_dir",
+    "Attachment",
     "Collection",
     "Conversation",
     "Model",

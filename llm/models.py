@@ -1,7 +1,11 @@
+import base64
 from dataclasses import dataclass, field
 import datetime
 from .errors import NeedsKeyException
+import hashlib
+import httpx
 from itertools import islice
+import puremagic
 import re
 import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Union
@@ -14,16 +18,87 @@ CONVERSATION_NAME_LENGTH = 32
 
 
 @dataclass
+class Attachment:
+    type: Optional[str] = None
+    path: Optional[str] = None
+    url: Optional[str] = None
+    content: Optional[bytes] = None
+    _id: Optional[str] = None
+
+    def id(self):
+        # Hash of the binary content, or of '{"url": "https://..."}' for URL attachments
+        if self._id is None:
+            if self.content:
+                self._id = hashlib.sha256(self.content).hexdigest()
+            elif self.path:
+                self._id = hashlib.sha256(open(self.path, "rb").read()).hexdigest()
+            else:
+                self._id = hashlib.sha256(
+                    json.dumps({"url": self.url}).encode("utf-8")
+                ).hexdigest()
+        return self._id
+
+    def resolve_type(self):
+        if self.type:
+            return self.type
+        # Derive it from path or url or content
+        if self.path:
+            return puremagic.from_file(self.path, mime=True)
+        if self.url:
+            response = httpx.head(self.url)
+            response.raise_for_status()
+            return response.headers.get("content-type")
+        if self.content:
+            return puremagic.from_string(self.content, mime=True)
+        raise ValueError("Attachment has no type and no content to derive it from")
+
+    def content_bytes(self):
+        content = self.content
+        if not content:
+            if self.path:
+                content = open(self.path, "rb").read()
+            elif self.url:
+                response = httpx.get(self.url)
+                response.raise_for_status()
+                content = response.content
+        return content
+
+    def base64_content(self):
+        return base64.b64encode(self.content_bytes()).decode("utf-8")
+
+    @classmethod
+    def from_row(cls, row):
+        return cls(
+            _id=row["id"],
+            type=row["type"],
+            path=row["path"],
+            url=row["url"],
+            content=row["content"],
+        )
+
+
+@dataclass
 class Prompt:
     prompt: str
     model: "Model"
+    attachments: Optional[List[Attachment]]
     system: Optional[str]
     prompt_json: Optional[str]
     options: "Options"
 
-    def __init__(self, prompt, model, system=None, prompt_json=None, options=None):
+    def __init__(
+        self,
+        prompt,
+        model,
+        *,
+        attachments=None,
+        system=None,
+        prompt_json=None,
+        options=None
+    ):
         self.prompt = prompt
         self.model = model
+        self.attachments = list(attachments or [])
         self.system = system
         self.prompt_json = prompt_json
         self.options = options or {}
@@ -39,6 +114,8 @@ class Conversation:
     def prompt(
         self,
         prompt: Optional[str],
+        *,
+        attachments: Optional[List[Attachment]] = None,
         system: Optional[str] = None,
         stream: bool = True,
         **options
@@ -46,8 +123,9 @@ class Conversation:
         return Response(
             Prompt(
                 prompt,
-                system=system,
                 model=self.model,
+                attachments=attachments,
+                system=system,
                 options=self.model.Options(**options),
             ),
             self.model,
@@ -82,6 +160,7 @@ class Response(ABC):
         self._done = False
         self.response_json = None
         self.conversation = conversation
+        self.attachments: List[Attachment] = []
 
     def __iter__(self) -> Iterator[str]:
         self._start = time.monotonic()
@@ -138,8 +217,9 @@ class Response(ABC):
             },
             ignore=True,
         )
+        response_id = str(ULID()).lower()
         response = {
-            "id": str(ULID()).lower(),
+            "id": response_id,
             "model": self.model.model_id,
             "prompt": self.prompt.prompt,
             "system": self.prompt.system,
@@ -156,16 +236,44 @@ class Response(ABC):
             "datetime_utc": self.datetime_utc(),
         }
         db["responses"].insert(response)
+        # Persist any attachments - loop through with index
+        for index, attachment in enumerate(self.prompt.attachments):
+            attachment_id = attachment.id()
+            db["attachments"].insert(
+                {
+                    "id": attachment_id,
+                    "type": attachment.resolve_type(),
+                    "path": attachment.path,
+                    "url": attachment.url,
+                    "content": attachment.content,
+                },
+                replace=True,
+            )
+            db["prompt_attachments"].insert(
+                {
+                    "response_id": response_id,
+                    "attachment_id": attachment_id,
+                    "order": index,
+                },
+            )
 
     @classmethod
-    def fake(cls, model: "Model", prompt: str, system: str, response: str):
+    def fake(
+        cls,
+        model: "Model",
+        prompt: str,
+        *attachments: List[Attachment],
+        system: str,
+        response: str
+    ):
         "Utility method to help with writing tests"
         response_obj = cls(
             model=model,
             prompt=Prompt(
                 prompt,
-                system=system,
                 model=model,
+                attachments=attachments,
+                system=system,
             ),
             stream=False,
         )
@@ -174,7 +282,7 @@ class Response(ABC):
         return response_obj
 
     @classmethod
-    def from_row(cls, row):
+    def from_row(cls, db, row):
         from llm import get_model
 
         model = get_model(row["model"])
@@ -183,8 +291,9 @@ class Response(ABC):
             model=model,
             prompt=Prompt(
                 prompt=row["prompt"],
-                system=row["system"],
                 model=model,
+                attachments=[],
+                system=row["system"],
                 options=model.Options(**json.loads(row["options_json"])),
             ),
             stream=False,
@@ -194,6 +303,19 @@ class Response(ABC):
         response.response_json = json.loads(row["response_json"] or "null")
         response._done = True
         response._chunks = [row["response"]]
+        # Attachments
+        response.attachments = [
+            Attachment.from_row(arow)
+            for arow in db.query(
+                """
+                select attachments.* from attachments
+                join prompt_attachments on attachments.id = prompt_attachments.attachment_id
+                where prompt_attachments.response_id = ?
+                order by prompt_attachments."order"
+            """,
+                [row["id"]],
+            )
+        ]
         return response
 
     def __repr__(self):
@@ -242,10 +364,15 @@ class _get_key_mixin:
 
 class Model(ABC, _get_key_mixin):
     model_id: str
+
+    # API key handling
     key: Optional[str] = None
     needs_key: Optional[str] = None
     key_env_var: Optional[str] = None
+
+    # Model characteristics
     can_stream: bool = False
+    attachment_types: Set = set()
 
     class Options(_Options):
         pass
@@ -269,13 +396,34 @@ class Model(ABC, _get_key_mixin):
 
     def prompt(
         self,
-        prompt: Optional[str],
+        prompt: str,
+        *,
+        attachments: Optional[List[Attachment]] = None,
         system: Optional[str] = None,
         stream: bool = True,
         **options
     ):
+        # Validate attachments
+        if attachments and not self.attachment_types:
+            raise ValueError(
+                "This model does not support attachments, but some were provided"
+            )
+        for attachment in attachments or []:
+            attachment_type = attachment.resolve_type()
+            if attachment_type not in self.attachment_types:
+                raise ValueError(
+                    "This model does not support attachments of type '{}', only {}".format(
+                        attachment_type, ", ".join(self.attachment_types)
+                    )
+                )
         return self.response(
-            Prompt(prompt, system=system, model=self, options=self.Options(**options)),
+            Prompt(
+                prompt,
+                attachments=attachments,
+                system=system,
+                model=self,
+                options=self.Options(**options),
+            ),
             stream=stream,
         )
 

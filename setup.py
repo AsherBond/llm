@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 import os
 
-VERSION = "0.16"
+VERSION = "0.17.1"
 
 
 def get_long_description():
@@ -48,12 +48,13 @@ setup(
         "setuptools",
         "pip",
         "pyreadline3; sys_platform == 'win32'",
+        "puremagic",
     ],
     extras_require={
         "test": [
             "pytest",
             "numpy",
-            "pytest-httpx",
+            "pytest-httpx>=0.33.0",
             "cogapp",
             "mypy>=1.10.0",
             "black>=24.1.0",
