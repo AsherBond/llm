@@ -30,10 +30,10 @@ from llm import (
 
 from .migrations import migrate
 from .plugins import pm
+from .utils import mimetype_from_path, mimetype_from_string
 import base64
 import httpx
 import pathlib
-import puremagic
 import pydantic
 import readline
 from runpy import run_module
@@ -58,9 +58,8 @@ class AttachmentType(click.ParamType):
         if value == "-":
             content = sys.stdin.buffer.read()
             # Try to guess type
-            try:
-                mimetype = puremagic.from_string(content, mime=True)
-            except puremagic.PureError:
+            mimetype = mimetype_from_string(content)
+            if mimetype is None:
                 raise click.BadParameter("Could not determine mimetype of stdin")
             return Attachment(type=mimetype, path=None, url=None, content=content)
         if "://" in value:
@@ -78,7 +77,9 @@ class AttachmentType(click.ParamType):
             self.fail(f"File {value} does not exist", param, ctx)
         path = path.resolve()
         # Try to guess type
-        mimetype = puremagic.from_file(str(path), mime=True)
+        mimetype = mimetype_from_path(str(path))
+        if mimetype is None:
+            raise click.BadParameter(f"Could not determine mimetype of {value}")
         return Attachment(type=mimetype, path=str(path), url=None, content=None)
 
 
@@ -121,11 +122,16 @@ def _validate_metadata_json(ctx, param, value):
 @click.version_option()
 def cli():
     """
-    Access large language models from the command-line
+    Access Large Language Models from the command-line
 
     Documentation: https://llm.datasette.io/
 
-    To get started, obtain an OpenAI key and set it like this:
+    LLM can run models from many different providers. Consult the
+    plugin directory for a list of available models:
+
+    https://llm.datasette.io/en/stable/plugins/directory.html
+
+    To get started with OpenAI, obtain an API key from them and:
 
     \b
         $ llm keys set openai
@@ -250,7 +256,13 @@ def prompt(
                 bits.append(prompt)
             prompt = " ".join(bits)
 
-        if prompt is None and not save and sys.stdin.isatty():
+        if (
+            prompt is None
+            and not save
+            and sys.stdin.isatty()
+            and not attachments
+            and not attachment_types
+        ):
             # Hang waiting for input to stdin (unless --save)
             prompt = sys.stdin.read()
         return prompt
@@ -955,11 +967,11 @@ def models_list(options):
         extra = ""
         if model_with_aliases.aliases:
             extra = " (aliases: {})".format(", ".join(model_with_aliases.aliases))
-        output = str(model_with_aliases.model) + extra
-        if options and model_with_aliases.model.Options.schema()["properties"]:
-            for name, field in model_with_aliases.model.Options.schema()[
-                "properties"
-            ].items():
+        model = model_with_aliases.model
+        output = str(model) + extra
+        if options and model.Options.schema()["properties"]:
+            output += "\n  Options:"
+            for name, field in model.Options.schema()["properties"].items():
                 any_of = field.get("anyOf")
                 if any_of is None:
                     any_of = [{"type": field["type"]}]
@@ -970,17 +982,24 @@ def models_list(options):
                         if item["type"] != "null"
                     ]
                 )
-                bits = ["\n  ", name, ": ", types]
+                bits = ["\n    ", name, ": ", types]
                 description = field.get("description", "")
                 if description and (
-                    model_with_aliases.model.__class__
-                    not in models_that_have_shown_options
+                    model.__class__ not in models_that_have_shown_options
                 ):
                     wrapped = textwrap.wrap(description, 70)
-                    bits.append("\n    ")
-                    bits.extend("\n    ".join(wrapped))
+                    bits.append("\n      ")
+                    bits.extend("\n      ".join(wrapped))
                 output += "".join(bits)
-            models_that_have_shown_options.add(model_with_aliases.model.__class__)
+            models_that_have_shown_options.add(model.__class__)
+        if options and model.attachment_types:
+            attachment_types = ", ".join(sorted(model.attachment_types))
+            wrapper = textwrap.TextWrapper(
+                width=min(max(shutil.get_terminal_size().columns, 30), 70),
+                initial_indent="    ",
+                subsequent_indent="    ",
+            )
+            output += "\n  Attachment types:\n{}".format(wrapper.fill(attachment_types))
         click.echo(output)
 
 
