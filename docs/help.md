@@ -121,6 +121,7 @@ Options:
   --cid, --conversation TEXT      Continue the conversation with the given ID.
   --key TEXT                      API key to use
   --save TEXT                     Save prompt with this template name
+  --async                         Run prompt asynchronously
   --help                          Show this message and exit.
 ```
 
@@ -156,6 +157,7 @@ Options:
 
 Commands:
   list*  List names of all stored keys
+  get    Return the value of a stored key
   path   Output the path to the keys.json file
   set    Save a key in the keys.json file
 ```
@@ -177,6 +179,21 @@ Options:
 Usage: llm keys path [OPTIONS]
 
   Output the path to the keys.json file
+
+Options:
+  --help  Show this message and exit.
+```
+
+(help-keys-get)=
+#### llm keys get --help
+```
+Usage: llm keys get [OPTIONS] NAME
+
+  Return the value of a stored key
+
+  Example usage:
+
+      export OPENAI_API_KEY=$(llm keys get openai)
 
 Options:
   --help  Show this message and exit.
@@ -306,6 +323,7 @@ Usage: llm models list [OPTIONS]
 
 Options:
   --options  Show options for each model, if available
+  --async    List async models
   --help     Show this message and exit.
 ```
 
