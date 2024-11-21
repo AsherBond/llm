@@ -18,13 +18,20 @@ from typing import (
     Set,
     Union,
 )
-from .utils import mimetype_from_path, mimetype_from_string
+from .utils import mimetype_from_path, mimetype_from_string, token_usage_string
 from abc import ABC, abstractmethod
 import json
 from pydantic import BaseModel
 from ulid import ULID
 
 CONVERSATION_NAME_LENGTH = 32
+
+
+@dataclass
+class Usage:
+    input: Optional[int] = None
+    output: Optional[int] = None
+    details: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -208,6 +215,20 @@ class _BaseResponse:
         self._start: Optional[float] = None
         self._end: Optional[float] = None
         self._start_utcnow: Optional[datetime.datetime] = None
+        self.input_tokens: Optional[int] = None
+        self.output_tokens: Optional[int] = None
+        self.token_details: Optional[dict] = None
+
+    def set_usage(
+        self,
+        *,
+        input: Optional[int] = None,
+        output: Optional[int] = None,
+        details: Optional[dict] = None,
+    ):
+        self.input_tokens = input
+        self.output_tokens = output
+        self.token_details = details
 
     @classmethod
     def from_row(cls, db, row):
@@ -246,6 +267,11 @@ class _BaseResponse:
         ]
         return response
 
+    def token_usage(self) -> str:
+        return token_usage_string(
+            self.input_tokens, self.output_tokens, self.token_details
+        )
+
     def log_to_db(self, db):
         conversation = self.conversation
         if not conversation:
@@ -272,11 +298,16 @@ class _BaseResponse:
                 for key, value in dict(self.prompt.options).items()
                 if value is not None
             },
-            "response": self.text(),
+            "response": self.text_or_raise(),
             "response_json": self.json(),
             "conversation_id": conversation.id,
             "duration_ms": self.duration_ms(),
             "datetime_utc": self.datetime_utc(),
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "token_details": (
+                json.dumps(self.token_details) if self.token_details else None
+            ),
         }
         db["responses"].insert(response)
         # Persist any attachments - loop through with index
@@ -316,6 +347,9 @@ class Response(_BaseResponse):
         self._force()
         return "".join(self._chunks)
 
+    def text_or_raise(self) -> str:
+        return self.text()
+
     def json(self) -> Optional[Dict[str, Any]]:
         self._force()
         return self.response_json
@@ -327,6 +361,14 @@ class Response(_BaseResponse):
     def datetime_utc(self) -> str:
         self._force()
         return self._start_utcnow.isoformat() if self._start_utcnow else ""
+
+    def usage(self) -> Usage:
+        self._force()
+        return Usage(
+            input=self.input_tokens,
+            output=self.output_tokens,
+            details=self.token_details,
+        )
 
     def __iter__(self) -> Iterator[str]:
         self._start = time.monotonic()
@@ -348,6 +390,12 @@ class Response(_BaseResponse):
             self.conversation.responses.append(self)
         self._end = time.monotonic()
         self._done = True
+
+    def __repr__(self):
+        text = "... not yet done ..."
+        if self._done:
+            text = "".join(self._chunks)
+        return "<Response prompt='{}' text='{}'>".format(self.prompt.prompt, text)
 
 
 class AsyncResponse(_BaseResponse):
@@ -393,6 +441,11 @@ class AsyncResponse(_BaseResponse):
                 pass
         return self
 
+    def text_or_raise(self) -> str:
+        if not self._done:
+            raise ValueError("Response not yet awaited")
+        return "".join(self._chunks)
+
     async def text(self) -> str:
         await self._force()
         return "".join(self._chunks)
@@ -409,8 +462,34 @@ class AsyncResponse(_BaseResponse):
         await self._force()
         return self._start_utcnow.isoformat() if self._start_utcnow else ""
 
+    async def usage(self) -> Usage:
+        await self._force()
+        return Usage(
+            input=self.input_tokens,
+            output=self.output_tokens,
+            details=self.token_details,
+        )
+
     def __await__(self):
         return self._force().__await__()
+
+    async def to_sync_response(self) -> Response:
+        await self._force()
+        response = Response(
+            self.prompt,
+            self.model,
+            self.stream,
+            conversation=self.conversation,
+        )
+        response._chunks = self._chunks
+        response._done = True
+        response._end = self._end
+        response._start = self._start
+        response._start_utcnow = self._start_utcnow
+        response.input_tokens = self.input_tokens
+        response.output_tokens = self.output_tokens
+        response.token_details = self.token_details
+        return response
 
     @classmethod
     def fake(
@@ -440,7 +519,7 @@ class AsyncResponse(_BaseResponse):
         text = "... not yet awaited ..."
         if self._done:
             text = "".join(self._chunks)
-        return "<Response prompt='{}' text='{}'>".format(self.prompt.prompt, text)
+        return "<AsyncResponse prompt='{}' text='{}'>".format(self.prompt.prompt, text)
 
 
 class Options(BaseModel):

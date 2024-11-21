@@ -1,4 +1,5 @@
 from click.testing import CliRunner
+from llm.models import Usage
 import llm.cli
 from unittest.mock import ANY
 import pytest
@@ -13,8 +14,10 @@ def test_mock_model(mock_model):
     assert response.text() == "hello world"
     assert str(response) == "hello world"
     assert model.history[0][0].prompt == "hello"
+    assert response.usage() == Usage(input=1, output=1, details=None)
     response2 = model.prompt(prompt="hello again")
     assert response2.text() == "second"
+    assert response2.usage() == Usage(input=2, output=1, details=None)
 
 
 @pytest.mark.xfail(sys.platform == "win32", reason="Expected to fail on Windows")
@@ -62,6 +65,9 @@ def test_chat_basic(mock_model, logs_db):
             "conversation_id": conversation_id,
             "duration_ms": ANY,
             "datetime_utc": ANY,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "token_details": None,
         },
         {
             "id": ANY,
@@ -75,6 +81,9 @@ def test_chat_basic(mock_model, logs_db):
             "conversation_id": conversation_id,
             "duration_ms": ANY,
             "datetime_utc": ANY,
+            "input_tokens": 2,
+            "output_tokens": 1,
+            "token_details": None,
         },
     ]
     # Now continue that conversation
@@ -116,6 +125,9 @@ def test_chat_basic(mock_model, logs_db):
             "conversation_id": conversation_id,
             "duration_ms": ANY,
             "datetime_utc": ANY,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "token_details": None,
         }
     ]
 
@@ -153,6 +165,9 @@ def test_chat_system(mock_model, logs_db):
             "conversation_id": ANY,
             "duration_ms": ANY,
             "datetime_utc": ANY,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "token_details": None,
         }
     ]
 
@@ -181,6 +196,9 @@ def test_chat_options(mock_model, logs_db):
             "conversation_id": ANY,
             "duration_ms": ANY,
             "datetime_utc": ANY,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "token_details": None,
         }
     ]
 

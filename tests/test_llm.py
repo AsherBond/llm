@@ -37,6 +37,8 @@ def log_path(user_path):
             "model": "davinci",
             "datetime_utc": (start + datetime.timedelta(seconds=i)).isoformat(),
             "conversation_id": "abc123",
+            "input_tokens": 2,
+            "output_tokens": 5,
         }
         for i in range(100)
     )
@@ -46,9 +48,12 @@ def log_path(user_path):
 datetime_re = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
 
-def test_logs_text(log_path):
+@pytest.mark.parametrize("usage", (False, True))
+def test_logs_text(log_path, usage):
     runner = CliRunner()
     args = ["logs", "-p", str(log_path)]
+    if usage:
+        args.append("-u")
     result = runner.invoke(cli, args, catch_exceptions=False)
     assert result.exit_code == 0
     output = result.output
@@ -64,18 +69,24 @@ def test_logs_text(log_path):
         "system\n\n"
         "## Response:\n\n"
         "response\n\n"
+    ) + ("## Token usage:\n\n2 input, 5 output\n\n" if usage else "") + (
         "# YYYY-MM-DDTHH:MM:SS    conversation: abc123\n\n"
         "Model: **davinci**\n\n"
         "## Prompt:\n\n"
         "prompt\n\n"
         "## Response:\n\n"
         "response\n\n"
+    ) + (
+        "## Token usage:\n\n2 input, 5 output\n\n" if usage else ""
+    ) + (
         "# YYYY-MM-DDTHH:MM:SS    conversation: abc123\n\n"
         "Model: **davinci**\n\n"
         "## Prompt:\n\n"
         "prompt\n\n"
         "## Response:\n\n"
         "response\n\n"
+    ) + (
+        "## Token usage:\n\n2 input, 5 output\n\n" if usage else ""
     )
 
 
@@ -585,3 +596,17 @@ def test_model_defaults(tmpdir, monkeypatch):
     assert config_path.exists()
     assert llm.get_default_model() == "gpt-4o"
     assert llm.get_model().model_id == "gpt-4o"
+
+
+def test_get_models():
+    models = llm.get_models()
+    assert all(isinstance(model, llm.Model) for model in models)
+    model_ids = [model.model_id for model in models]
+    assert "gpt-4o-mini" in model_ids
+
+
+def test_get_async_models():
+    models = llm.get_async_models()
+    assert all(isinstance(model, llm.AsyncModel) for model in models)
+    model_ids = [model.model_id for model in models]
+    assert "gpt-4o-mini" in model_ids

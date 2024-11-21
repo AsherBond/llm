@@ -1,6 +1,11 @@
 from llm import AsyncModel, EmbeddingModel, Model, hookimpl
 import llm
-from llm.utils import dicts_to_table_string, remove_dict_none_values, logging_client
+from llm.utils import (
+    dicts_to_table_string,
+    remove_dict_none_values,
+    logging_client,
+    simplify_usage_dict,
+)
 import click
 import datetime
 import httpx
@@ -375,7 +380,9 @@ class _Shared:
                     messages.append(
                         {"role": "user", "content": prev_response.prompt.prompt}
                     )
-                messages.append({"role": "assistant", "content": prev_response.text()})
+                messages.append(
+                    {"role": "assistant", "content": prev_response.text_or_raise()}
+                )
         if prompt.system and prompt.system != current_system:
             messages.append({"role": "system", "content": prompt.system})
         if not prompt.attachments:
@@ -388,6 +395,16 @@ class _Shared:
                 attachment_message.append(_attachment(attachment))
             messages.append({"role": "user", "content": attachment_message})
         return messages
+
+    def set_usage(self, response, usage):
+        if not usage:
+            return
+        input_tokens = usage.pop("prompt_tokens")
+        output_tokens = usage.pop("completion_tokens")
+        usage.pop("total_tokens")
+        response.set_usage(
+            input=input_tokens, output=output_tokens, details=simplify_usage_dict(usage)
+        )
 
     def get_client(self, async_=False):
         kwargs = {}
@@ -443,6 +460,7 @@ class Chat(_Shared, Model):
         messages = self.build_messages(prompt, conversation)
         kwargs = self.build_kwargs(prompt, stream)
         client = self.get_client()
+        usage = None
         if stream:
             completion = client.chat.completions.create(
                 model=self.model_name or self.model_id,
@@ -453,6 +471,8 @@ class Chat(_Shared, Model):
             chunks = []
             for chunk in completion:
                 chunks.append(chunk)
+                if chunk.usage:
+                    usage = chunk.usage.model_dump()
                 try:
                     content = chunk.choices[0].delta.content
                 except IndexError:
@@ -467,8 +487,10 @@ class Chat(_Shared, Model):
                 stream=False,
                 **kwargs,
             )
+            usage = completion.usage.model_dump()
             response.response_json = remove_dict_none_values(completion.model_dump())
             yield completion.choices[0].message.content
+        self.set_usage(response, usage)
         response._prompt_json = redact_data({"messages": messages})
 
 
@@ -491,6 +513,7 @@ class AsyncChat(_Shared, AsyncModel):
         messages = self.build_messages(prompt, conversation)
         kwargs = self.build_kwargs(prompt, stream)
         client = self.get_client(async_=True)
+        usage = None
         if stream:
             completion = await client.chat.completions.create(
                 model=self.model_name or self.model_id,
@@ -500,6 +523,8 @@ class AsyncChat(_Shared, AsyncModel):
             )
             chunks = []
             async for chunk in completion:
+                if chunk.usage:
+                    usage = chunk.usage.model_dump()
                 chunks.append(chunk)
                 try:
                     content = chunk.choices[0].delta.content
@@ -516,7 +541,9 @@ class AsyncChat(_Shared, AsyncModel):
                 **kwargs,
             )
             response.response_json = remove_dict_none_values(completion.model_dump())
+            usage = completion.usage.model_dump()
             yield completion.choices[0].message.content
+        self.set_usage(response, usage)
         response._prompt_json = redact_data({"messages": messages})
 
 
