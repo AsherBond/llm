@@ -37,10 +37,17 @@ def register_models(register):
         AsyncChat("gpt-4o-mini", vision=True),
         aliases=("4o-mini",),
     )
-    register(
-        Chat("gpt-4o-audio-preview", audio=True),
-        AsyncChat("gpt-4o-audio-preview", audio=True),
-    )
+    for audio_model_id in (
+        "gpt-4o-audio-preview",
+        "gpt-4o-audio-preview-2024-12-17",
+        "gpt-4o-audio-preview-2024-10-01",
+        "gpt-4o-mini-audio-preview",
+        "gpt-4o-mini-audio-preview-2024-12-17",
+    ):
+        register(
+            Chat(audio_model_id, audio=True),
+            AsyncChat(audio_model_id, audio=True),
+        )
     # 3.5 and 4
     register(
         Chat("gpt-3.5-turbo"), AsyncChat("gpt-3.5-turbo"), aliases=("3.5", "chatgpt")
@@ -63,12 +70,12 @@ def register_models(register):
     )
     # o1
     register(
-        Chat("o1-preview", can_stream=False, allows_system_prompt=False),
-        AsyncChat("o1-preview", can_stream=False, allows_system_prompt=False),
+        Chat("o1-preview", allows_system_prompt=False),
+        AsyncChat("o1-preview", allows_system_prompt=False),
     )
     register(
-        Chat("o1-mini", can_stream=False, allows_system_prompt=False),
-        AsyncChat("o1-mini", can_stream=False, allows_system_prompt=False),
+        Chat("o1-mini", allows_system_prompt=False),
+        AsyncChat("o1-mini", allows_system_prompt=False),
     )
     # The -instruct completion model
     register(
