@@ -301,6 +301,7 @@ Options:
   -t, --truncate              Truncate long strings in output
   -u, --usage                 Include token usage
   -r, --response              Just output the last response
+  -x, --extract               Extract first fenced code block
   -c, --current               Show logs from the current conversation
   --cid, --conversation TEXT  Show logs for this conversation ID
   --json                      Output logs as JSON
@@ -330,9 +331,10 @@ Usage: llm models list [OPTIONS]
   List available models
 
 Options:
-  --options  Show options for each model, if available
-  --async    List async models
-  --help     Show this message and exit.
+  --options         Show options for each model, if available
+  --async           List async models
+  -q, --query TEXT  Search for models matching this string
+  --help            Show this message and exit.
 ```
 
 (help-models-default)=

@@ -246,11 +246,18 @@ llm models
 ```
 Example output:
 ```
-OpenAI Chat: gpt-3.5-turbo (aliases: 3.5, chatgpt)
-OpenAI Chat: gpt-3.5-turbo-16k (aliases: chatgpt-16k, 3.5-16k)
-OpenAI Chat: gpt-4 (aliases: 4, gpt4)
-OpenAI Chat: gpt-4-32k (aliases: 4-32k)
-PaLM 2: chat-bison-001 (aliases: palm, palm2)
+OpenAI Chat: gpt-4o (aliases: 4o)
+OpenAI Chat: gpt-4o-mini (aliases: 4o-mini)
+OpenAI Chat: o1-preview
+OpenAI Chat: o1-mini
+GeminiPro: gemini-1.5-pro-002
+GeminiPro: gemini-1.5-flash-002
+...
+```
+
+Add `-q term` to search for models matching a specific search term:
+```bash
+llm models -q gpt-4o
 ```
 
 Add `--options` to also see documentation for the options supported by each model:
@@ -464,6 +471,32 @@ OpenAI Chat: gpt-4-turbo (aliases: gpt-4-turbo-preview, 4-turbo, 4t)
     logit_bias: dict, str
     seed: int
     json_object: boolean
+OpenAI Chat: o1
+  Options:
+    temperature: float
+    max_tokens: int
+    top_p: float
+    frequency_penalty: float
+    presence_penalty: float
+    stop: str
+    logit_bias: dict, str
+    seed: int
+    json_object: boolean
+  Attachment types:
+    image/gif, image/jpeg, image/png, image/webp
+OpenAI Chat: o1-2024-12-17
+  Options:
+    temperature: float
+    max_tokens: int
+    top_p: float
+    frequency_penalty: float
+    presence_penalty: float
+    stop: str
+    logit_bias: dict, str
+    seed: int
+    json_object: boolean
+  Attachment types:
+    image/gif, image/jpeg, image/png, image/webp
 OpenAI Chat: o1-preview
   Options:
     temperature: float
@@ -517,6 +550,7 @@ OpenAI Completion: gpt-3.5-turbo-instruct (aliases: 3.5-instruct, chatgpt-instru
       Integer seed to attempt to sample deterministically
     logprobs: int
       Include the log probabilities of most likely N per token
+Default: gpt-4o-mini
 
 ```
 <!-- [[[end]]] -->
