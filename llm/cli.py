@@ -450,7 +450,13 @@ def prompt(
                 if extract:
                     text = extract_first_fenced_code_block(text) or text
                 print(text)
+    # List of exceptions that should never be raised in pytest:
+    except (ValueError, NotImplementedError) as ex:
+        raise click.ClickException(str(ex))
     except Exception as ex:
+        # All other exceptions should raise in pytest, show to user otherwise
+        if getattr(sys, "_called_from_test", False):
+            raise
         raise click.ClickException(str(ex))
 
     if isinstance(response, AsyncResponse):
@@ -1136,7 +1142,8 @@ def models_list(options, async_, query):
             )
             output += "\n  Attachment types:\n{}".format(wrapper.fill(attachment_types))
         click.echo(output)
-    click.echo(f"Default: {get_default_model()}")
+    if not query:
+        click.echo(f"Default: {get_default_model()}")
 
 
 @models.command(name="default")
