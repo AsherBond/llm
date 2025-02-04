@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 import os
 
-VERSION = "0.20"
+VERSION = "0.21"
 
 
 def get_long_description():
@@ -58,7 +58,7 @@ setup(
             "pytest-asyncio",
             "cogapp",
             "mypy>=1.10.0",
-            "black>=24.1.0",
+            "black>=25.1.0",
             "ruff",
             "types-click",
             "types-PyYAML",
