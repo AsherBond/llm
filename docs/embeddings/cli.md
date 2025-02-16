@@ -148,7 +148,10 @@ All three mechanisms support these options:
 - `-d database.db` to specify a different database file to store the embeddings in
 - `--store` to store the original content in the embeddings table in addition to the embedding vector
 - `--prefix` to prepend a prefix to the stored ID of each item
+- `--prepend` to prepend a string to the content before embedding 
 - `--batch-size SIZE` to process embeddings in batches of the specified size
+
+The `--prepend` option is useful for embedding models that require you to prepend a special token to the content before embedding it. [nomic-embed-text-v2-moe](https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe) for example requires documents to be prepended `'search_document: '` and search queries to be prepended `'search_query: '`.
 
 (embeddings-cli-embed-multi-csv-etc)=
 ### Embedding data from a CSV, TSV or JSON file
@@ -358,8 +361,14 @@ llm embed-models
 ```
 The output should look something like this:
 ```
-3-small (aliases: ada)
-sentence-transformers/all-MiniLM-L6-v2 (aliases: all-MiniLM-L6-v2)
+OpenAIEmbeddingModel: text-embedding-ada-002 (aliases: ada, ada-002)
+OpenAIEmbeddingModel: text-embedding-3-small (aliases: 3-small)
+OpenAIEmbeddingModel: text-embedding-3-large (aliases: 3-large)
+...
+```
+Add `-q` one or more times to search for models matching those terms:
+```bash
+llm embed-models -q 3-small
 ```
 
 (embeddings-cli-embed-models-default)=

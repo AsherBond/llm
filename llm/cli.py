@@ -1153,15 +1153,22 @@ _type_lookup = {
     "--options", is_flag=True, help="Show options for each model, if available"
 )
 @click.option("async_", "--async", is_flag=True, help="List async models")
-@click.option("-q", "--query", help="Search for models matching this string")
+@click.option(
+    "-q",
+    "--query",
+    multiple=True,
+    help="Search for models matching these strings",
+)
 def models_list(options, async_, query):
     "List available models"
     models_that_have_shown_options = set()
     for model_with_aliases in get_models_with_aliases():
         if async_ and not model_with_aliases.async_model:
             continue
-        if query and not model_with_aliases.matches(query):
-            continue
+        if query:
+            # Only show models where every provided query string matches
+            if not all(model_with_aliases.matches(q) for q in query):
+                continue
         extra = ""
         if model_with_aliases.aliases:
             extra = " (aliases: {})".format(", ".join(model_with_aliases.aliases))
@@ -1293,17 +1300,51 @@ def aliases_list(json_):
 
 @aliases.command(name="set")
 @click.argument("alias")
-@click.argument("model_id")
-def aliases_set(alias, model_id):
+@click.argument("model_id", required=False)
+@click.option(
+    "-q",
+    "--query",
+    multiple=True,
+    help="Set alias for model matching these strings",
+)
+def aliases_set(alias, model_id, query):
     """
     Set an alias for a model
 
     Example usage:
 
     \b
-        $ llm aliases set turbo gpt-3.5-turbo
+        llm aliases set mini gpt-4o-mini
+
+    Alternatively you can omit the model ID and specify one or more -q options.
+    The first model matching all of those query strings will be used.
+
+    \b
+        llm aliases set mini -q 4o -q mini
     """
-    set_alias(alias, model_id)
+    if not model_id:
+        if not query:
+            raise click.ClickException(
+                "You must provide a model_id or at least one -q option"
+            )
+        # Search for the first model matching all query strings
+        found = None
+        for model_with_aliases in get_models_with_aliases():
+            if all(model_with_aliases.matches(q) for q in query):
+                found = model_with_aliases
+                break
+        if not found:
+            raise click.ClickException(
+                "No model found matching query: " + ", ".join(query)
+            )
+        model_id = found.model.model_id
+        set_alias(alias, model_id)
+        click.echo(
+            f"Alias '{alias}' set to model '{model_id}'",
+            err=True,
+        )
+    else:
+        set_alias(alias, model_id)
 
 
 @aliases.command(name="remove")
@@ -1574,6 +1615,10 @@ def embed(
 )
 @click.option("--prefix", help="Prefix to add to the IDs", default="")
 @click.option("-m", "--model", help="Embedding model to use")
+@click.option(
+    "--prepend",
+    help="Prepend this string to all content before embedding",
+)
 @click.option("--store", is_flag=True, help="Store the text itself in the database")
 @click.option(
     "-d",
@@ -1593,6 +1638,7 @@ def embed_multi(
     batch_size,
     prefix,
     model,
+    prepend,
     store,
     database,
 ):
@@ -1715,11 +1761,15 @@ def embed_multi(
         def tuples() -> Iterable[Tuple[str, Union[bytes, str]]]:
             for row in rows:
                 values = list(row.values())
-                id = prefix + str(values[0])
+                id: str = prefix + str(values[0])
+                content: Optional[Union[bytes, str]] = None
                 if binary:
-                    yield id, cast(bytes, values[1])
+                    content = cast(bytes, values[1])
                 else:
-                    yield id, " ".join(v or "" for v in values[1:])
+                    content = " ".join(v or "" for v in values[1:])
+                if prepend and isinstance(content, str):
+                    content = prepend + content
+                yield id, content or ""
 
         embed_kwargs = {"store": store}
         if batch_size:
@@ -1811,11 +1861,20 @@ def embed_models():
 
 
 @embed_models.command(name="list")
-def embed_models_list():
+@click.option(
+    "-q",
+    "--query",
+    multiple=True,
+    help="Search for embedding models matching these strings",
+)
+def embed_models_list(query):
     "List available embedding models"
     output = []
     for model_with_aliases in get_embedding_models_with_aliases():
-        s = str(model_with_aliases.model.model_id)
+        if query:
+            if not all(model_with_aliases.matches(q) for q in query):
+                continue
+        s = str(model_with_aliases.model)
         if model_with_aliases.aliases:
             s += " (aliases: {})".format(", ".join(model_with_aliases.aliases))
         output.append(s)

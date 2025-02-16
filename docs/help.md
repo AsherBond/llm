@@ -336,7 +336,7 @@ Usage: llm models list [OPTIONS]
 Options:
   --options         Show options for each model, if available
   --async           List async models
-  -q, --query TEXT  Search for models matching this string
+  -q, --query TEXT  Search for models matching these strings
   --help            Show this message and exit.
 ```
 
@@ -444,16 +444,22 @@ Options:
 (help-aliases-set)=
 #### llm aliases set --help
 ```
-Usage: llm aliases set [OPTIONS] ALIAS MODEL_ID
+Usage: llm aliases set [OPTIONS] ALIAS [MODEL_ID]
 
   Set an alias for a model
 
   Example usage:
 
-      $ llm aliases set turbo gpt-3.5-turbo
+      llm aliases set mini gpt-4o-mini
+
+  Alternatively you can omit the model ID and specify one or more -q options.
+  The first model matching all of those query strings will be used.
+
+      llm aliases set mini -q 4o -q mini
 
 Options:
-  --help  Show this message and exit.
+  -q, --query TEXT  Set alias for model matching these strings
+  --help            Show this message and exit.
 ```
 
 (help-aliases-remove)=
@@ -573,6 +579,8 @@ Options:
   --batch-size INTEGER         Batch size to use when running embeddings
   --prefix TEXT                Prefix to add to the IDs
   -m, --model TEXT             Embedding model to use
+  --prepend TEXT               Prepend this string to all content before
+                               embedding
   --store                      Store the text itself in the database
   -d, --database FILE
   --help                       Show this message and exit.
@@ -625,7 +633,8 @@ Usage: llm embed-models list [OPTIONS]
   List available embedding models
 
 Options:
-  --help  Show this message and exit.
+  -q, --query TEXT  Search for embedding models matching these strings
+  --help            Show this message and exit.
 ```
 
 (help-embed-models-default)=
