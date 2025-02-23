@@ -131,14 +131,9 @@ class _BaseConversation:
     responses: List["_BaseResponse"] = field(default_factory=list)
 
     @classmethod
-    def from_row(cls, row):
-        from llm import get_model
-
-        return cls(
-            model=get_model(row["model"]),
-            id=row["id"],
-            name=row["name"],
-        )
+    @abstractmethod
+    def from_row(cls, row: Any) -> "_BaseConversation":
+        raise NotImplementedError
 
 
 @dataclass
@@ -150,6 +145,7 @@ class Conversation(_BaseConversation):
         attachments: Optional[List[Attachment]] = None,
         system: Optional[str] = None,
         stream: bool = True,
+        key: Optional[str] = None,
         **options,
     ) -> "Response":
         return Response(
@@ -163,7 +159,23 @@ class Conversation(_BaseConversation):
             self.model,
             stream,
             conversation=self,
+            key=key,
         )
+
+    @classmethod
+    def from_row(cls, row):
+        from llm import get_model
+
+        return cls(
+            model=get_model(row["model"]),
+            id=row["id"],
+            name=row["name"],
+        )
+
+    def __repr__(self):
+        count = len(self.responses)
+        s = "s" if count == 1 else ""
+        return f"<{self.__class__.__name__}: {self.id} - {count} response{s}"
 
 
 @dataclass
@@ -175,6 +187,7 @@ class AsyncConversation(_BaseConversation):
         attachments: Optional[List[Attachment]] = None,
         system: Optional[str] = None,
         stream: bool = True,
+        key: Optional[str] = None,
         **options,
     ) -> "AsyncResponse":
         return AsyncResponse(
@@ -188,7 +201,23 @@ class AsyncConversation(_BaseConversation):
             self.model,
             stream,
             conversation=self,
+            key=key,
         )
+
+    @classmethod
+    def from_row(cls, row):
+        from llm import get_async_model
+
+        return cls(
+            model=get_async_model(row["model"]),
+            id=row["id"],
+            name=row["name"],
+        )
+
+    def __repr__(self):
+        count = len(self.responses)
+        s = "s" if count == 1 else ""
+        return f"<{self.__class__.__name__}: {self.id} - {count} response{s}"
 
 
 class _BaseResponse:
@@ -197,6 +226,7 @@ class _BaseResponse:
     prompt: "Prompt"
     stream: bool
     conversation: Optional["_BaseConversation"] = None
+    _key: Optional[str] = None
 
     def __init__(
         self,
@@ -204,11 +234,13 @@ class _BaseResponse:
         model: "_BaseModel",
         stream: bool,
         conversation: Optional[_BaseConversation] = None,
+        key: Optional[str] = None,
     ):
         self.prompt = prompt
         self._prompt_json = None
         self.model = model
         self.stream = stream
+        self._key = key
         self._chunks: List[str] = []
         self._done = False
         self.response_json = None
@@ -234,10 +266,13 @@ class _BaseResponse:
         self.token_details = details
 
     @classmethod
-    def from_row(cls, db, row):
-        from llm import get_model
+    def from_row(cls, db, row, _async=False):
+        from llm import get_model, get_async_model
 
-        model = get_model(row["model"])
+        if _async:
+            model = get_async_model(row["model"])
+        else:
+            model = get_model(row["model"])
 
         response = cls(
             model=model,
@@ -390,14 +425,27 @@ class Response(_BaseResponse):
             yield from self._chunks
             return
 
-        for chunk in self.model.execute(
-            self.prompt,
-            stream=self.stream,
-            response=self,
-            conversation=self.conversation,
-        ):
-            yield chunk
-            self._chunks.append(chunk)
+        if isinstance(self.model, Model):
+            for chunk in self.model.execute(
+                self.prompt,
+                stream=self.stream,
+                response=self,
+                conversation=self.conversation,
+            ):
+                yield chunk
+                self._chunks.append(chunk)
+        elif isinstance(self.model, KeyModel):
+            for chunk in self.model.execute(
+                self.prompt,
+                stream=self.stream,
+                response=self,
+                conversation=self.conversation,
+                key=self.model.get_key(self._key),
+            ):
+                yield chunk
+                self._chunks.append(chunk)
+        else:
+            raise Exception("self.model must be a Model or KeyModel")
 
         if self.conversation:
             self.conversation.responses.append(self)
@@ -415,6 +463,10 @@ class Response(_BaseResponse):
 class AsyncResponse(_BaseResponse):
     model: "AsyncModel"
     conversation: Optional["AsyncConversation"] = None
+
+    @classmethod
+    def from_row(cls, db, row, _async=False):
+        return super().from_row(db, row, _async=True)
 
     async def on_done(self, callback):
         if not self._done:
@@ -447,12 +499,24 @@ class AsyncResponse(_BaseResponse):
             return chunk
 
         if not hasattr(self, "_generator"):
-            self._generator = self.model.execute(
-                self.prompt,
-                stream=self.stream,
-                response=self,
-                conversation=self.conversation,
-            )
+
+            if isinstance(self.model, AsyncModel):
+                self._generator = self.model.execute(
+                    self.prompt,
+                    stream=self.stream,
+                    response=self,
+                    conversation=self.conversation,
+                )
+            elif isinstance(self.model, AsyncKeyModel):
+                self._generator = self.model.execute(
+                    self.prompt,
+                    stream=self.stream,
+                    response=self,
+                    conversation=self.conversation,
+                    key=self.model.get_key(self._key),
+                )
+            else:
+                raise ValueError("self.model must be an AsyncModel or AsyncKeyModel")
 
         try:
             chunk = await self._generator.__anext__()
@@ -564,7 +628,11 @@ _Options = Options
 
 
 class _get_key_mixin:
-    def get_key(self):
+    needs_key: Optional[str] = None
+    key: Optional[str] = None
+    key_env_var: Optional[str] = None
+
+    def get_key(self, explicit_key: Optional[str] = None) -> Optional[str]:
         from llm import get_key
 
         if self.needs_key is None:
@@ -577,7 +645,9 @@ class _get_key_mixin:
 
         # Attempt to load a key using llm.get_key()
         key = get_key(
-            explicit_key=None, key_alias=self.needs_key, env_var=self.key_env_var
+            explicit_key=explicit_key,
+            key_alias=self.needs_key,
+            env_var=self.key_env_var,
         )
         if key:
             return key
@@ -593,9 +663,6 @@ class _get_key_mixin:
 
 class _BaseModel(ABC, _get_key_mixin):
     model_id: str
-    key: Optional[str] = None
-    needs_key: Optional[str] = None
-    key_env_var: Optional[str] = None
     can_stream: bool = False
     attachment_types: Set = set()
 
@@ -616,25 +683,19 @@ class _BaseModel(ABC, _get_key_mixin):
                 )
 
     def __str__(self) -> str:
-        return "{}: {}".format(self.__class__.__name__, self.model_id)
+        return "{}{}: {}".format(
+            self.__class__.__name__,
+            " (async)" if isinstance(self, (AsyncModel, AsyncKeyModel)) else "",
+            self.model_id,
+        )
 
     def __repr__(self) -> str:
         return f"<{str(self)}>"
 
 
-class Model(_BaseModel):
+class _Model(_BaseModel):
     def conversation(self) -> Conversation:
         return Conversation(model=self)
-
-    @abstractmethod
-    def execute(
-        self,
-        prompt: Prompt,
-        stream: bool,
-        response: Response,
-        conversation: Optional[Conversation],
-    ) -> Iterator[str]:
-        pass
 
     def prompt(
         self,
@@ -645,6 +706,7 @@ class Model(_BaseModel):
         stream: bool = True,
         **options,
     ) -> Response:
+        key = options.pop("key", None)
         self._validate_attachments(attachments)
         return Response(
             Prompt(
@@ -656,22 +718,38 @@ class Model(_BaseModel):
             ),
             self,
             stream,
+            key=key,
         )
 
 
-class AsyncModel(_BaseModel):
-    def conversation(self) -> AsyncConversation:
-        return AsyncConversation(model=self)
-
+class Model(_Model):
     @abstractmethod
-    async def execute(
+    def execute(
         self,
         prompt: Prompt,
         stream: bool,
-        response: AsyncResponse,
-        conversation: Optional[AsyncConversation],
-    ) -> AsyncGenerator[str, None]:
-        yield ""
+        response: Response,
+        conversation: Optional[Conversation],
+    ) -> Iterator[str]:
+        pass
+
+
+class KeyModel(_Model):
+    @abstractmethod
+    def execute(
+        self,
+        prompt: Prompt,
+        stream: bool,
+        response: Response,
+        conversation: Optional[Conversation],
+        key: Optional[str],
+    ) -> Iterator[str]:
+        pass
+
+
+class _AsyncModel(_BaseModel):
+    def conversation(self) -> AsyncConversation:
+        return AsyncConversation(model=self)
 
     def prompt(
         self,
@@ -682,6 +760,7 @@ class AsyncModel(_BaseModel):
         stream: bool = True,
         **options,
     ) -> AsyncResponse:
+        key = options.pop("key", None)
         self._validate_attachments(attachments)
         return AsyncResponse(
             Prompt(
@@ -693,7 +772,33 @@ class AsyncModel(_BaseModel):
             ),
             self,
             stream,
+            key=key,
         )
+
+
+class AsyncModel(_AsyncModel):
+    @abstractmethod
+    async def execute(
+        self,
+        prompt: Prompt,
+        stream: bool,
+        response: AsyncResponse,
+        conversation: Optional[AsyncConversation],
+    ) -> AsyncGenerator[str, None]:
+        yield ""
+
+
+class AsyncKeyModel(_AsyncModel):
+    @abstractmethod
+    async def execute(
+        self,
+        prompt: Prompt,
+        stream: bool,
+        response: AsyncResponse,
+        conversation: Optional[AsyncConversation],
+        key: Optional[str],
+    ) -> AsyncGenerator[str, None]:
+        yield ""
 
 
 class EmbeddingModel(ABC, _get_key_mixin):

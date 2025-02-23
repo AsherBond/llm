@@ -164,27 +164,35 @@ def test_logs_extract_last_code(args, log_path):
     assert result.output == 'print("hello word")\n\n'
 
 
-def test_logs_prompts(log_path):
+@pytest.mark.parametrize("arg", ("-s", "--short"))
+@pytest.mark.parametrize("usage", (None, "-u", "--usage"))
+def test_logs_short(log_path, arg, usage):
     runner = CliRunner()
-    result = runner.invoke(cli, ["logs", "--prompts", "-p", str(log_path)])
+    args = ["logs", arg, "-p", str(log_path)]
+    if usage:
+        args.append(usage)
+    result = runner.invoke(cli, args)
     assert result.exit_code == 0
     output = datetime_re.sub("YYYY-MM-DDTHH:MM:SS", result.output)
+    expected_usage = ""
+    if usage:
+        expected_usage = "  usage:\n    input: 2\n    output: 5\n"
     expected = (
         "- model: davinci\n"
-        "  datetime: YYYY-MM-DDTHH:MM:SS\n"
+        "  datetime: 'YYYY-MM-DDTHH:MM:SS'\n"
         "  conversation: abc123\n"
         "  system: system\n"
-        "  prompt: prompt\n"
+        f"  prompt: prompt\n{expected_usage}"
         "- model: davinci\n"
-        "  datetime: YYYY-MM-DDTHH:MM:SS\n"
+        "  datetime: 'YYYY-MM-DDTHH:MM:SS'\n"
         "  conversation: abc123\n"
         "  system: system\n"
-        "  prompt: prompt\n"
+        f"  prompt: prompt\n{expected_usage}"
         "- model: davinci\n"
-        "  datetime: YYYY-MM-DDTHH:MM:SS\n"
+        "  datetime: 'YYYY-MM-DDTHH:MM:SS'\n"
         "  conversation: abc123\n"
         "  system: system\n"
-        "  prompt: prompt\n"
+        f"  prompt: prompt\n{expected_usage}"
     )
     assert output == expected
 
@@ -388,6 +396,57 @@ def test_llm_default_prompt(
             "conversation_model": "gpt-4o-mini",
         }.items()
     )
+
+
+@mock.patch.dict(os.environ, {"OPENAI_API_KEY": "X"})
+@pytest.mark.parametrize("async_", (False, True))
+def test_llm_prompt_continue(httpx_mock, user_path, async_):
+    httpx_mock.add_response(
+        method="POST",
+        url="https://api.openai.com/v1/chat/completions",
+        json={
+            "model": "gpt-4o-mini",
+            "usage": {},
+            "choices": [{"message": {"content": "Bob, Alice, Eve"}}],
+        },
+        headers={"Content-Type": "application/json"},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url="https://api.openai.com/v1/chat/completions",
+        json={
+            "model": "gpt-4o-mini",
+            "usage": {},
+            "choices": [{"message": {"content": "Terry"}}],
+        },
+        headers={"Content-Type": "application/json"},
+    )
+
+    log_path = user_path / "logs.db"
+    log_db = sqlite_utils.Database(str(log_path))
+    log_db["responses"].delete_where()
+
+    # First prompt
+    runner = CliRunner()
+    args = ["three names \nfor a pet pelican", "--no-stream"] + (
+        ["--async"] if async_ else []
+    )
+    result = runner.invoke(cli, args, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert result.output == "Bob, Alice, Eve\n"
+
+    # Should be logged
+    rows = list(log_db["responses"].rows)
+    assert len(rows) == 1
+
+    # Now ask a follow-up
+    args2 = ["one more", "-c", "--no-stream"] + (["--async"] if async_ else [])
+    result2 = runner.invoke(cli, args2, catch_exceptions=False)
+    assert result2.exit_code == 0, result2.output
+    assert result2.output == "Terry\n"
+
+    rows = list(log_db["responses"].rows)
+    assert len(rows) == 2
 
 
 @pytest.mark.parametrize(
@@ -662,14 +721,14 @@ def test_llm_models_options(user_path):
     result = runner.invoke(cli, ["models", "--options"], catch_exceptions=False)
     assert result.exit_code == 0
     assert EXPECTED_OPTIONS.strip() in result.output
-    assert "AsyncMockModel: mock" not in result.output
+    assert "AsyncMockModel (async): mock" not in result.output
 
 
 def test_llm_models_async(user_path):
     runner = CliRunner()
     result = runner.invoke(cli, ["models", "--async"], catch_exceptions=False)
     assert result.exit_code == 0
-    assert "AsyncMockModel: mock" in result.output
+    assert "AsyncMockModel (async): mock" in result.output
 
 
 @pytest.mark.parametrize(
@@ -718,7 +777,7 @@ def test_model_defaults(tmpdir, monkeypatch):
 
 def test_get_models():
     models = llm.get_models()
-    assert all(isinstance(model, llm.Model) for model in models)
+    assert all(isinstance(model, (llm.Model, llm.KeyModel)) for model in models)
     model_ids = [model.model_id for model in models]
     assert "gpt-4o-mini" in model_ids
     # Ensure no model_ids are duplicated
@@ -728,7 +787,9 @@ def test_get_models():
 
 def test_get_async_models():
     models = llm.get_async_models()
-    assert all(isinstance(model, llm.AsyncModel) for model in models)
+    assert all(
+        isinstance(model, (llm.AsyncModel, llm.AsyncKeyModel)) for model in models
+    )
     model_ids = [model.model_id for model in models]
     assert "gpt-4o-mini" in model_ids
 
@@ -745,6 +806,18 @@ def test_mock_model(mock_model):
     response2 = model.prompt(prompt="hello again")
     assert response2.text() == "second"
     assert response2.usage() == Usage(input=2, output=1, details=None)
+
+
+def test_mock_key_model(mock_key_model):
+    response = mock_key_model.prompt(prompt="hello", key="hi")
+    assert response.text() == "key: hi"
+
+
+@pytest.mark.asyncio
+async def test_mock_async_key_model(mock_async_key_model):
+    response = mock_async_key_model.prompt(prompt="hello", key="hi")
+    output = await response.text()
+    assert output == "async, key: hi"
 
 
 def test_sync_on_done(mock_model):

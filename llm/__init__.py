@@ -4,14 +4,17 @@ from .errors import (
     NeedsKeyException,
 )
 from .models import (
+    AsyncConversation,
+    AsyncKeyModel,
     AsyncModel,
     AsyncResponse,
     Attachment,
     Conversation,
-    Model,
-    ModelWithAliases,
     EmbeddingModel,
     EmbeddingModelWithAliases,
+    KeyModel,
+    Model,
+    ModelWithAliases,
     Options,
     Prompt,
     Response,
@@ -27,22 +30,25 @@ import pathlib
 import struct
 
 __all__ = [
-    "hookimpl",
-    "get_async_model",
-    "get_model",
-    "get_key",
-    "user_dir",
+    "AsyncConversation",
+    "AsyncKeyModel",
     "AsyncResponse",
     "Attachment",
     "Collection",
     "Conversation",
+    "get_async_model",
+    "get_key",
+    "get_model",
+    "hookimpl",
+    "KeyModel",
     "Model",
+    "ModelError",
+    "NeedsKeyException",
     "Options",
     "Prompt",
     "Response",
     "Template",
-    "ModelError",
-    "NeedsKeyException",
+    "user_dir",
 ]
 DEFAULT_MODEL = "gpt-4o-mini"
 

@@ -7,12 +7,15 @@ import json
 import re
 from llm import (
     Attachment,
+    AsyncConversation,
+    AsyncKeyModel,
     AsyncResponse,
     Collection,
     Conversation,
     Response,
     Template,
     UnknownModelError,
+    KeyModel,
     encode,
     get_async_model,
     get_default_model,
@@ -20,7 +23,6 @@ from llm import (
     get_embedding_models_with_aliases,
     get_embedding_model_aliases,
     get_embedding_model,
-    get_key,
     get_plugins,
     get_model,
     get_model_aliases,
@@ -31,6 +33,7 @@ from llm import (
     set_default_embedding_model,
     remove_alias,
 )
+from llm.models import _BaseConversation
 
 from .migrations import migrate
 from .plugins import pm, load_plugins
@@ -362,7 +365,7 @@ def prompt(
     if conversation_id or _continue:
         # Load the conversation - loads most recent if no ID provided
         try:
-            conversation = load_conversation(conversation_id)
+            conversation = load_conversation(conversation_id, async_=async_)
         except UnknownModelError as ex:
             raise click.ClickException(str(ex))
 
@@ -382,10 +385,6 @@ def prompt(
     except UnknownModelError as ex:
         raise click.ClickException(ex)
 
-    # Provide the API key, if one is needed and has been provided
-    if model.needs_key:
-        model.key = get_key(key, model.needs_key, model.key_env_var)
-
     if conversation:
         # To ensure it can see the key
         conversation.model = model
@@ -403,11 +402,16 @@ def prompt(
         except pydantic.ValidationError as ex:
             raise click.ClickException(render_errors(ex.errors()))
 
+    kwargs = {**validated_options}
+
     resolved_attachments = [*attachments, *attachment_types]
 
     should_stream = model.can_stream and not no_stream
     if not should_stream:
-        validated_options["stream"] = False
+        kwargs["stream"] = False
+
+    if isinstance(model, (KeyModel, AsyncKeyModel)):
+        kwargs["key"] = key
 
     prompt = read_prompt()
     response = None
@@ -425,7 +429,7 @@ def prompt(
                         prompt,
                         attachments=resolved_attachments,
                         system=system,
-                        **validated_options,
+                        **kwargs,
                     )
                     async for chunk in response:
                         print(chunk, end="")
@@ -436,7 +440,7 @@ def prompt(
                         prompt,
                         attachments=resolved_attachments,
                         system=system,
-                        **validated_options,
+                        **kwargs,
                     )
                     text = await response.text()
                     if extract or extract_last:
@@ -452,7 +456,7 @@ def prompt(
                 prompt,
                 attachments=resolved_attachments,
                 system=system,
-                **validated_options,
+                **kwargs,
             )
             if should_stream:
                 for chunk in response:
@@ -586,10 +590,6 @@ def chat(
     except KeyError:
         raise click.ClickException("'{}' is not a known model".format(model_id))
 
-    # Provide the API key, if one is needed and has been provided
-    if model.needs_key:
-        model.key = get_key(key, model.needs_key, model.key_env_var)
-
     if conversation is None:
         # Start a fresh conversation for this chat
         conversation = Conversation(model=model)
@@ -609,9 +609,15 @@ def chat(
         except pydantic.ValidationError as ex:
             raise click.ClickException(render_errors(ex.errors()))
 
+    kwargs = {}
+    kwargs.update(validated_options)
+
     should_stream = model.can_stream and not no_stream
     if not should_stream:
-        validated_options["stream"] = False
+        kwargs["stream"] = False
+
+    if key and isinstance(model, KeyModel):
+        kwargs["key"] = key
 
     click.echo("Chatting with {}".format(model.model_id))
     click.echo("Type 'exit' or 'quit' to exit")
@@ -642,7 +648,7 @@ def chat(
                 raise click.ClickException(str(ex))
         if prompt.strip() in ("exit", "quit"):
             break
-        response = conversation.prompt(prompt, system=system, **validated_options)
+        response = conversation.prompt(prompt, system=system, **kwargs)
         # System prompt only sent for the first message:
         system = None
         for chunk in response:
@@ -652,7 +658,9 @@ def chat(
         print("")
 
 
-def load_conversation(conversation_id: Optional[str]) -> Optional[Conversation]:
+def load_conversation(
+    conversation_id: Optional[str], async_=False
+) -> Optional[_BaseConversation]:
     db = sqlite_utils.Database(logs_db_path())
     migrate(db)
     if conversation_id is None:
@@ -669,11 +677,13 @@ def load_conversation(conversation_id: Optional[str]) -> Optional[Conversation]:
             "No conversation found with id={}".format(conversation_id)
         )
     # Inflate that conversation
-    conversation = Conversation.from_row(row)
+    conversation_class = AsyncConversation if async_ else Conversation
+    response_class = AsyncResponse if async_ else Response
+    conversation = conversation_class.from_row(row)
     for response in db["responses"].rows_where(
         "conversation_id = ?", [conversation_id]
     ):
-        conversation.responses.append(Response.from_row(db, response))
+        conversation.responses.append(response_class.from_row(db, response))
     return conversation
 
 
@@ -873,11 +883,11 @@ order by prompt_attachments."order"
 @click.option("-m", "--model", help="Filter by model or model alias")
 @click.option("-q", "--query", help="Search for logs matching this string")
 @click.option("-t", "--truncate", is_flag=True, help="Truncate long strings in output")
+@click.option(
+    "-s", "--short", is_flag=True, help="Shorter YAML output with truncated prompts"
+)
 @click.option("-u", "--usage", is_flag=True, help="Include token usage")
 @click.option("-r", "--response", is_flag=True, help="Just output the last response")
-@click.option(
-    "--prompts", is_flag=True, help="Output prompts, end-truncated if necessary"
-)
 @click.option("-x", "--extract", is_flag=True, help="Extract first fenced code block")
 @click.option(
     "extract_last",
@@ -912,9 +922,9 @@ def logs_list(
     model,
     query,
     truncate,
+    short,
     usage,
     response,
-    prompts,
     extract,
     extract_last,
     current_conversation,
@@ -928,7 +938,7 @@ def logs_list(
     db = sqlite_utils.Database(path)
     migrate(db)
 
-    if prompts and (json_output or response):
+    if short and (json_output or response):
         invalid = " or ".join(
             [
                 flag[0]
@@ -936,9 +946,7 @@ def logs_list(
                 if flag[1]
             ]
         )
-        raise click.ClickException(
-            "Cannot use --prompts and {} together".format(invalid)
-        )
+        raise click.ClickException("Cannot use --short and {} together".format(invalid))
 
     if response and not current_conversation and not conversation_id:
         current_conversation = True
@@ -1052,26 +1060,39 @@ def logs_list(
         current_system = None
         should_show_conversation = True
         for row in rows:
-            if prompts:
+            if short:
                 system = _truncate_string(row["system"], 120, end=True)
                 prompt = _truncate_string(row["prompt"], 120, end=True)
                 cid = row["conversation_id"]
                 attachments = attachments_by_id.get(row["id"])
-                lines = [
-                    "- model: {}".format(row["model"]),
-                    "  datetime: {}".format(row["datetime_utc"]).split(".")[0],
-                    "  conversation: {}".format(cid),
-                ]
+                obj = {
+                    "model": row["model"],
+                    "datetime": row["datetime_utc"].split(".")[0],
+                    "conversation": cid,
+                }
                 if system:
-                    lines.append("  system: {}".format(system))
+                    obj["system"] = system
                 if prompt:
-                    lines.append("  prompt: {}".format(prompt))
+                    obj["prompt"] = prompt
                 if attachments:
-                    lines.append("  attachments:")
+                    items = []
                     for attachment in attachments:
-                        path = attachment["path"] or attachment["url"]
-                        lines.append("  - {}: {}".format(attachment["type"], path))
-                click.echo("\n".join(lines))
+                        details = {"type": attachment["type"]}
+                        if attachment.get("path"):
+                            details["path"] = attachment["path"]
+                        if attachment.get("url"):
+                            details["url"] = attachment["url"]
+                        items.append(details)
+                    obj["attachments"] = items
+                if usage and (row["input_tokens"] or row["output_tokens"]):
+                    usage_details = {
+                        "input": row["input_tokens"],
+                        "output": row["output_tokens"],
+                    }
+                    if row["token_details"]:
+                        usage_details["details"] = json.loads(row["token_details"])
+                    obj["usage"] = usage_details
+                click.echo(yaml.dump([obj], sort_keys=False).strip())
                 continue
             click.echo(
                 "# {}{}\n{}".format(
