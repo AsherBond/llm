@@ -42,6 +42,13 @@ from .utils import (
     mimetype_from_string,
     token_usage_string,
     extract_fenced_code_block,
+    make_schema_id,
+    output_rows_as_json,
+    resolve_schema_input,
+    schema_summary,
+    multi_schema,
+    schema_dsl,
+    find_unused_key,
 )
 import base64
 import httpx
@@ -114,16 +121,28 @@ def attachment_types_callback(ctx, param, values):
     return collected
 
 
-def _validate_metadata_json(ctx, param, value):
-    if value is None:
-        return value
-    try:
-        obj = json.loads(value)
-        if not isinstance(obj, dict):
-            raise click.BadParameter("Metadata must be a JSON object")
-        return obj
-    except json.JSONDecodeError:
-        raise click.BadParameter("Metadata must be valid JSON")
+def json_validator(object_name):
+    def validator(ctx, param, value):
+        if value is None:
+            return value
+        try:
+            obj = json.loads(value)
+            if not isinstance(obj, dict):
+                raise click.BadParameter(f"{object_name} must be a JSON object")
+            return obj
+        except json.JSONDecodeError:
+            raise click.BadParameter(f"{object_name} must be valid JSON")
+
+    return validator
+
+
+def schema_option(fn):
+    click.option(
+        "schema_input",
+        "--schema",
+        help="JSON schema, filepath or ID",
+    )(fn)
+    return fn
 
 
 @click.group(
@@ -184,6 +203,11 @@ def cli():
     multiple=True,
     help="key/value options for the model",
 )
+@schema_option
+@click.option(
+    "--schema-multi",
+    help="JSON schema to use for multiple results",
+)
 @click.option("-t", "--template", help="Template to use")
 @click.option(
     "-p",
@@ -228,6 +252,8 @@ def prompt(
     attachments,
     attachment_types,
     options,
+    schema_input,
+    schema_multi,
     template,
     param,
     no_stream,
@@ -272,10 +298,24 @@ def prompt(
     if log and no_log:
         raise click.ClickException("--log and --no-log are mutually exclusive")
 
+    log_path = logs_db_path()
+    (log_path.parent).mkdir(parents=True, exist_ok=True)
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+
+    if schema_multi:
+        schema_input = schema_multi
+
+    schema = resolve_schema_input(db, schema_input, load_template)
+
+    if schema_multi:
+        # Convert that schema into multiple "items" of the same schema
+        schema = multi_schema(schema)
+
     model_aliases = get_model_aliases()
 
     def read_prompt():
-        nonlocal prompt
+        nonlocal prompt, schema
 
         # Is there extra prompt available on stdin?
         stdin_prompt = None
@@ -294,6 +334,7 @@ def prompt(
             and sys.stdin.isatty()
             and not attachments
             and not attachment_types
+            and not schema
         ):
             # Hang waiting for input to stdin (unless --save)
             prompt = sys.stdin.read()
@@ -332,11 +373,14 @@ def prompt(
             to_save["extract"] = True
         if extract_last:
             to_save["extract_last"] = True
+        if schema:
+            to_save["schema_object"] = schema
         path.write_text(
             yaml.dump(
                 to_save,
                 indent=4,
                 default_flow_style=False,
+                sort_keys=False,
             ),
             "utf-8",
         )
@@ -350,6 +394,8 @@ def prompt(
         template_obj = load_template(template)
         extract = template_obj.extract
         extract_last = template_obj.extract_last
+        if template_obj.schema_object:
+            schema = template_obj.schema_object
         prompt = read_prompt()
         try:
             prompt, system = template_obj.evaluate(prompt, params)
@@ -429,6 +475,7 @@ def prompt(
                         prompt,
                         attachments=resolved_attachments,
                         system=system,
+                        schema=schema,
                         **kwargs,
                     )
                     async for chunk in response:
@@ -440,6 +487,7 @@ def prompt(
                         prompt,
                         attachments=resolved_attachments,
                         system=system,
+                        schema=schema,
                         **kwargs,
                     )
                     text = await response.text()
@@ -456,6 +504,7 @@ def prompt(
                 prompt,
                 attachments=resolved_attachments,
                 system=system,
+                schema=schema,
                 **kwargs,
             )
             if should_stream:
@@ -491,10 +540,6 @@ def prompt(
 
     # Log to the database
     if (logs_on() or log) and not no_log:
-        log_path = logs_db_path()
-        (log_path.parent).mkdir(parents=True, exist_ok=True)
-        db = sqlite_utils.Database(log_path)
-        migrate(db)
         response.log_to_db(db)
 
 
@@ -829,13 +874,15 @@ LOGS_COLUMNS = """    responses.id,
     responses.output_tokens,
     responses.token_details,
     conversations.name as conversation_name,
-    conversations.model as conversation_model"""
+    conversations.model as conversation_model,
+    schemas.content as schema_json"""
 
 LOGS_SQL = """
 select
 {columns}
 from
     responses
+left join schemas on responses.schema_id = schemas.id
 left join conversations on responses.conversation_id = conversations.id{extra_where}
 order by responses.id desc{limit}
 """
@@ -844,6 +891,7 @@ select
 {columns}
 from
     responses
+left join schemas on responses.schema_id = schemas.id
 left join conversations on responses.conversation_id = conversations.id
 join responses_fts on responses_fts.rowid = responses.rowid
 where responses_fts match :query{extra_where}
@@ -882,6 +930,19 @@ order by prompt_attachments."order"
 )
 @click.option("-m", "--model", help="Filter by model or model alias")
 @click.option("-q", "--query", help="Search for logs matching this string")
+@schema_option
+@click.option(
+    "--schema-multi",
+    help="JSON schema used for multiple results",
+)
+@click.option(
+    "--data", is_flag=True, help="Output newline-delimited JSON data for schema"
+)
+@click.option("--data-array", is_flag=True, help="Output JSON array of data for schema")
+@click.option("--data-key", help="Return JSON objects from array in this key")
+@click.option(
+    "--data-ids", is_flag=True, help="Attach corresponding IDs to JSON objects"
+)
 @click.option("-t", "--truncate", is_flag=True, help="Truncate long strings in output")
 @click.option(
     "-s", "--short", is_flag=True, help="Shorter YAML output with truncated prompts"
@@ -910,6 +971,8 @@ order by prompt_attachments."order"
     "--conversation",
     help="Show logs for this conversation ID",
 )
+@click.option("--id-gt", help="Return responses with ID > this")
+@click.option("--id-gte", help="Return responses with ID >= this")
 @click.option(
     "json_output",
     "--json",
@@ -921,6 +984,12 @@ def logs_list(
     path,
     model,
     query,
+    schema_input,
+    schema_multi,
+    data,
+    data_array,
+    data_key,
+    data_ids,
     truncate,
     short,
     usage,
@@ -929,6 +998,8 @@ def logs_list(
     extract_last,
     current_conversation,
     conversation_id,
+    id_gt,
+    id_gte,
     json_output,
 ):
     "Show recent logged prompts and their responses"
@@ -937,6 +1008,12 @@ def logs_list(
         raise click.ClickException("No log database found at {}".format(path))
     db = sqlite_utils.Database(path)
     migrate(db)
+
+    if schema_multi:
+        schema_input = schema_multi
+    schema = resolve_schema_input(db, schema_input, load_template)
+    if schema_multi:
+        schema = multi_schema(schema)
 
     if short and (json_output or response):
         invalid = " or ".join(
@@ -996,6 +1073,15 @@ def logs_list(
         where_bits.append("responses.model = :model")
     if conversation_id:
         where_bits.append("responses.conversation_id = :conversation_id")
+    if id_gt:
+        where_bits.append("responses.id > :id_gt")
+    if id_gte:
+        where_bits.append("responses.id >= :id_gte")
+    schema_id = None
+    if schema:
+        schema_id = make_schema_id(schema)[0]
+        where_bits.append("responses.schema_id = :schema_id")
+
     if where_bits:
         where_ = " and " if query else " where "
         sql_format["extra_where"] = where_ + " and ".join(where_bits)
@@ -1004,13 +1090,21 @@ def logs_list(
     rows = list(
         db.query(
             final_sql,
-            {"model": model_id, "query": query, "conversation_id": conversation_id},
+            {
+                "model": model_id,
+                "query": query,
+                "conversation_id": conversation_id,
+                "schema_id": schema_id,
+                "id_gt": id_gt,
+                "id_gte": id_gte,
+            },
         )
     )
+
     # Reverse the order - we do this because we 'order by id desc limit 3' to get the
     # 3 most recent results, but we still want to display them in chronological order
     # ... except for searches where we don't do this
-    if not query:
+    if not query and not data:
         rows.reverse()
 
     # Fetch any attachments
@@ -1019,6 +1113,33 @@ def logs_list(
     attachments_by_id = {}
     for attachment in attachments:
         attachments_by_id.setdefault(attachment["response_id"], []).append(attachment)
+
+    if data or data_array or data_key or data_ids:
+        # Special case for --data to output valid JSON
+        to_output = []
+        for row in rows:
+            response = row["response"] or ""
+            try:
+                decoded = json.loads(response)
+                new_items = []
+                if (
+                    isinstance(decoded, dict)
+                    and (data_key in decoded)
+                    and all(isinstance(item, dict) for item in decoded[data_key])
+                ):
+                    for item in decoded[data_key]:
+                        new_items.append(item)
+                else:
+                    new_items.append(decoded)
+                if data_ids:
+                    for item in new_items:
+                        item[find_unused_key(item, "response_id")] = row["id"]
+                        item[find_unused_key(item, "conversation_id")] = row["id"]
+                to_output.extend(new_items)
+            except ValueError:
+                pass
+        click.echo(output_rows_as_json(to_output, not data_array))
+        return
 
     for row in rows:
         if truncate:
@@ -1098,7 +1219,9 @@ def logs_list(
                 "# {}{}\n{}".format(
                     row["datetime_utc"].split(".")[0],
                     (
-                        "    conversation: {}".format(row["conversation_id"])
+                        "    conversation: {} id: {}".format(
+                            row["conversation_id"], row["id"]
+                        )
                         if should_show_conversation
                         else ""
                     ),
@@ -1112,11 +1235,17 @@ def logs_list(
             # In conversation log mode only show it for the first one
             if conversation_id:
                 should_show_conversation = False
-            click.echo("## Prompt:\n\n{}".format(row["prompt"]))
+            click.echo("## Prompt\n\n{}".format(row["prompt"] or "-- none --"))
             if row["system"] != current_system:
                 if row["system"] is not None:
-                    click.echo("\n## System:\n\n{}".format(row["system"]))
+                    click.echo("\n## System\n\n{}".format(row["system"]))
                 current_system = row["system"]
+            if row["schema_json"]:
+                click.echo(
+                    "\n## Schema\n\n```json\n{}\n```".format(
+                        json.dumps(row["schema_json"], indent=2)
+                    )
+                )
             attachments = attachments_by_id.get(row["id"])
             if attachments:
                 click.echo("\n### Attachments\n")
@@ -1141,7 +1270,15 @@ def logs_list(
                             )
                         )
 
-            click.echo("\n## Response:\n\n{}\n".format(row["response"]))
+            # If a schema was provided and the row is valid JSON, pretty print and syntax highlight it
+            response = row["response"]
+            if row["schema_json"]:
+                try:
+                    parsed = json.loads(response)
+                    response = "```json\n{}\n```".format(json.dumps(parsed, indent=2))
+                except ValueError:
+                    pass
+            click.echo("\n## Response\n\n{}\n".format(response))
             if usage:
                 token_usage = token_usage_string(
                     row["input_tokens"],
@@ -1174,13 +1311,14 @@ _type_lookup = {
     "--options", is_flag=True, help="Show options for each model, if available"
 )
 @click.option("async_", "--async", is_flag=True, help="List async models")
+@click.option("--schemas", is_flag=True, help="List models that support schemas")
 @click.option(
     "-q",
     "--query",
     multiple=True,
     help="Search for models matching these strings",
 )
-def models_list(options, async_, query):
+def models_list(options, async_, schemas, query):
     "List available models"
     models_that_have_shown_options = set()
     for model_with_aliases in get_models_with_aliases():
@@ -1190,6 +1328,8 @@ def models_list(options, async_, query):
             # Only show models where every provided query string matches
             if not all(model_with_aliases.matches(q) for q in query):
                 continue
+        if schemas and not model_with_aliases.model.supports_schema:
+            continue
         extra = ""
         if model_with_aliases.aliases:
             extra = " (aliases: {})".format(", ".join(model_with_aliases.aliases))
@@ -1197,9 +1337,9 @@ def models_list(options, async_, query):
             model_with_aliases.model if not async_ else model_with_aliases.async_model
         )
         output = str(model) + extra
-        if options and model.Options.schema()["properties"]:
+        if options and model.Options.model_json_schema()["properties"]:
             output += "\n  Options:"
-            for name, field in model.Options.schema()["properties"].items():
+            for name, field in model.Options.model_json_schema()["properties"].items():
                 any_of = field.get("anyOf")
                 if any_of is None:
                     any_of = [{"type": field.get("type", "str")}]
@@ -1228,8 +1368,18 @@ def models_list(options, async_, query):
                 subsequent_indent="    ",
             )
             output += "\n  Attachment types:\n{}".format(wrapper.fill(attachment_types))
+        features = (
+            []
+            + (["streaming"] if model.can_stream else [])
+            + (["schemas"] if model.supports_schema else [])
+            + (["async"] if model_with_aliases.async_model else [])
+        )
+        if options and features:
+            output += "\n  Features:\n{}".format(
+                "\n".join("  - {}".format(feature) for feature in features)
+            )
         click.echo(output)
-    if not query:
+    if not query and not options and not schemas:
         click.echo(f"Default: {get_default_model()}")
 
 
@@ -1282,6 +1432,122 @@ def templates_list():
         for name, prompt in sorted(pairs):
             text = fmt.format(name=name, prompt=prompt)
             click.echo(display_truncated(text))
+
+
+@cli.group(
+    cls=DefaultGroup,
+    default="list",
+    default_if_no_args=True,
+)
+def schemas():
+    "Manage stored schemas"
+
+
+@schemas.command(name="list")
+@click.option(
+    "-p",
+    "--path",
+    type=click.Path(readable=True, exists=True, dir_okay=False),
+    help="Path to log database",
+)
+@click.option(
+    "queries",
+    "-q",
+    "--query",
+    multiple=True,
+    help="Search for schemas matching this string",
+)
+@click.option("--full", is_flag=True, help="Output full schema contents")
+def schemas_list(path, queries, full):
+    "List stored schemas"
+    path = pathlib.Path(path or logs_db_path())
+    if not path.exists():
+        raise click.ClickException("No log database found at {}".format(path))
+    db = sqlite_utils.Database(path)
+    migrate(db)
+
+    params = []
+    where_sql = ""
+    if queries:
+        where_bits = ["schemas.content like ?" for _ in queries]
+        where_sql += " where {}".format(" and ".join(where_bits))
+        params.extend("%{}%".format(q) for q in queries)
+
+    sql = """
+    select
+      schemas.id,
+      schemas.content,
+      max(responses.datetime_utc) as recently_used,
+      count(*) as times_used
+    from schemas
+    join responses
+      on responses.schema_id = schemas.id
+    {} group by responses.schema_id
+    order by recently_used
+    """.format(
+        where_sql
+    )
+    rows = db.query(sql, params)
+    for row in rows:
+        click.echo("- id: {}".format(row["id"]))
+        if full:
+            click.echo(
+                "  schema: |\n{}".format(
+                    textwrap.indent(
+                        json.dumps(json.loads(row["content"]), indent=2), "    "
+                    )
+                )
+            )
+        else:
+            click.echo(
+                "  summary: |\n    {}".format(
+                    schema_summary(json.loads(row["content"]))
+                )
+            )
+        click.echo(
+            "  usage: |\n    {} time{}, most recently {}".format(
+                row["times_used"],
+                "s" if row["times_used"] != 1 else "",
+                row["recently_used"],
+            )
+        )
+
+
+@schemas.command(name="show")
+@click.argument("schema_id")
+@click.option(
+    "-p",
+    "--path",
+    type=click.Path(readable=True, exists=True, dir_okay=False),
+    help="Path to log database",
+)
+def schemas_show(schema_id, path):
+    "Show a stored schema"
+    path = pathlib.Path(path or logs_db_path())
+    if not path.exists():
+        raise click.ClickException("No log database found at {}".format(path))
+    db = sqlite_utils.Database(path)
+    migrate(db)
+
+    try:
+        row = db["schemas"].get(schema_id)
+    except sqlite_utils.db.NotFoundError:
+        raise click.ClickException("Invalid schema ID")
+    click.echo(json.dumps(json.loads(row["content"]), indent=2))
+
+
+@schemas.command(name="dsl")
+@click.argument("input")
+@click.option("--multi", is_flag=True, help="Wrap in an array")
+def schemas_dsl_debug(input, multi):
+    """
+    Convert LLM's schema DSL to a JSON schema
+
+    \b
+        llm schema dsl 'name, age int, bio: their bio'
+    """
+    schema = schema_dsl(input, multi)
+    click.echo(json.dumps(schema, indent=2))
 
 
 @cli.group(
@@ -1413,7 +1679,7 @@ def templates_show(name):
     template = load_template(name)
     click.echo(
         yaml.dump(
-            dict((k, v) for k, v in template.dict().items() if v is not None),
+            dict((k, v) for k, v in template.model_dump().items() if v is not None),
             indent=4,
             default_flow_style=False,
         )
@@ -1510,7 +1776,7 @@ def uninstall(packages, yes):
 @click.option(
     "--metadata",
     help="JSON object metadata to store",
-    callback=_validate_metadata_json,
+    callback=json_validator("metadata"),
 )
 @click.option(
     "format_",
@@ -1820,7 +2086,7 @@ def embed_multi(
 )
 def similar(collection, id, input, content, binary, number, database):
     """
-    Return top N similar IDs from a collection
+    Return top N similar IDs from a collection using cosine similarity.
 
     Example usage:
 

@@ -1,5 +1,30 @@
 # Changelog
 
+(v0_23)=
+## 0.23 (2025-02-28)
+
+Support for **schemas**, for getting supported models to output JSON that matches a specified JSON schema. See also [Structured data extraction from unstructured content using LLM schemas](https://simonwillison.net/2025/Feb/28/llm-schemas/) for background on this feature. [#776](https://github.com/simonw/llm/issues/776)
+
+- New `llm prompt --schema '{JSON schema goes here}` option for specifying a schema that should be used for the output from the model. The {ref}`schemas documentation <schemas>` has more details and a tutorial.
+- Schemas can also be defined using a {ref}`concise schema specification <schemas-dsl>`, for example `llm prompt --schema 'name, bio, age int'`. [#790](https://github.com/simonw/llm/issues/790)
+- Schemas can also be specified by passing a filename and through {ref}`several other methods <schemas-specify>`. [#780](https://github.com/simonw/llm/issues/780)
+- New {ref}`llm schemas family of commands <help-schemas>`: `llm schemas list`, `llm schemas show`, and `llm schemas dsl` for debugging the new concise schema language. [#781](https://github.com/simonw/llm/issues/781)
+- Schemas can now be saved to templates using `llm --schema X --save template-name` or through modifying the {ref}`template YAML <prompt-templates-yaml>`. [#778](https://github.com/simonw/llm/issues/778)
+- The {ref}`llm logs <logging>` command now has new options for extracting data collected using schemas: `--data`, `--data-key`, `--data-array`, `--data-ids`. [#782](https://github.com/simonw/llm/issues/782)
+- New `llm logs --id-gt X` and `--id-gte X` options. [#801](https://github.com/simonw/llm/issues/801)
+- New `llm models --schemas` option for listing models that support schemas. [#797](https://github.com/simonw/llm/issues/797)
+- `model.prompt(..., schema={...})` parameter for specifying a schema from Python. This accepts either a dictionary JSON schema definition or a Pydantic `BaseModel` subclass, see {ref}`schemas in the Python API docs <python-api-schemas>`.
+- The default OpenAI plugin now enables schemas across all supported models. Run `llm models --schemas` for a list of these.
+- The [llm-anthropic](https://github.com/simonw/llm-anthropic) and [llm-gemini](https://github.com/simonw/llm-gemini) plugins have been upgraded to add schema support for those models. Here's documentation on how to {ref}`add schema support to a model plugin <advanced-model-plugins-schemas>`.
+
+Other smaller changes:
+
+- [GPT-4.5 preview](https://openai.com/index/introducing-gpt-4-5/) is now a supported model: `llm -m gpt-4.5 'a joke about a pelican and a wolf'` [#795](https://github.com/simonw/llm/issues/795)
+- The prompt string is now optional when calling `model.prompt()` from the Python API, so `model.prompt(attachments=llm.Attachment(url=url)))` now works. [#784](https://github.com/simonw/llm/issues/784)
+- `extra-openai-models.yaml` now supports a `reasoning: true` option. Thanks, [Kasper Primdal Lauritzen](https://github.com/KPLauritzen). [#766](https://github.com/simonw/llm/pull/766)
+- LLM now depends on Pydantic v2 or higher. Pydantic v1 is no longer supported. [#520](https://github.com/simonw/llm/issues/520)
+
+
 (v0_22)=
 ## 0.22 (2025-02-16)
 
@@ -411,7 +436,7 @@ There's also a new {ref}`llm.Collection <embeddings-python-collections>` class f
 - The output format for `llm logs` has changed. Previously it was JSON - it's now a much more readable Markdown format suitable for pasting into other documents. [#160](https://github.com/simonw/llm/issues/160)
   - The new `llm logs --json` option can be used to get the old JSON format.
   - Pass `llm logs --conversation ID` or `--cid ID` to see the full logs for a specific conversation.
-- You can now combine piped input and a prompt in a single command: `cat script.py | llm 'explain this code'`. This works even for models that do not support {ref}`system prompts <system-prompts>`. [#153](https://github.com/simonw/llm/issues/153)
+- You can now combine piped input and a prompt in a single command: `cat script.py | llm 'explain this code'`. This works even for models that do not support {ref}`system prompts <usage-system-prompts>`. [#153](https://github.com/simonw/llm/issues/153)
 - Additional {ref}`openai-compatible-models` can now be configured with custom HTTP headers. This enables platforms such as [openrouter.ai](https://openrouter.ai/) to be used with LLM, which can provide Claude access even without an Anthropic API key.
 - Keys set in `keys.json` are now used in preference to environment variables. [#158](https://github.com/simonw/llm/issues/158)
 - The documentation now includes a {ref}`plugin directory <plugin-directory>` listing all available plugins for LLM. [#173](https://github.com/simonw/llm/issues/173)
@@ -467,7 +492,7 @@ Use `llm aliases list` to see a list of aliases and `llm aliases remove turbo` t
 - Models hosted on [Replicate](https://replicate.com/) can now be accessed using the [llm-replicate](https://github.com/simonw/llm-replicate) plugin, including the new Llama 2 model from Meta AI. More details here: [Accessing Llama 2 from the command-line with the llm-replicate plugin](https://simonwillison.net/2023/Jul/18/accessing-llama-2/).
 - Model providers that expose an API that is compatible with the OpenAPI API format, including self-hosted model servers such as [LocalAI](https://github.com/go-skynet/LocalAI), can now be accessed using {ref}`additional configuration <openai-compatible-models>` for the default OpenAI plugin. [#106](https://github.com/simonw/llm/issues/106)
 - OpenAI models that are not yet supported by LLM can also {ref}`be configured <openai-extra-models>` using the new `extra-openai-models.yaml` configuration file. [#107](https://github.com/simonw/llm/issues/107)
-- The {ref}`llm logs command <viewing-logs>` now accepts a `-m model_id` option to filter logs to a specific model. Aliases can be used here in addition to model IDs. [#108](https://github.com/simonw/llm/issues/108)
+- The {ref}`llm logs command <logging-view>` now accepts a `-m model_id` option to filter logs to a specific model. Aliases can be used here in addition to model IDs. [#108](https://github.com/simonw/llm/issues/108)
 - Logs now have a SQLite full-text search index against their prompts and responses, and the `llm logs -q SEARCH` option can be used to return logs that match a search term. [#109](https://github.com/simonw/llm/issues/109)
 
 (v0_5)=

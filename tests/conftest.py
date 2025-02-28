@@ -50,6 +50,7 @@ def env_setup(monkeypatch, user_path):
 class MockModel(llm.Model):
     model_id = "mock"
     attachment_types = {"image/png", "audio/wav"}
+    supports_schema = True
 
     class Options(llm.Options):
         max_tokens: Optional[int] = Field(
@@ -76,7 +77,9 @@ class MockModel(llm.Model):
                 break
             except IndexError:
                 break
-        response.set_usage(input=len(prompt.prompt.split()), output=len(gathered))
+        response.set_usage(
+            input=len((prompt.prompt or "").split()), output=len(gathered)
+        )
 
 
 class MockKeyModel(llm.KeyModel):
@@ -97,6 +100,7 @@ class MockAsyncKeyModel(llm.AsyncKeyModel):
 
 class AsyncMockModel(llm.AsyncModel):
     model_id = "mock"
+    supports_schema = True
 
     def __init__(self):
         self.history = []
@@ -118,7 +122,9 @@ class AsyncMockModel(llm.AsyncModel):
                 break
             except IndexError:
                 break
-        response.set_usage(input=len(prompt.prompt.split()), output=len(gathered))
+        response.set_usage(
+            input=len((prompt.prompt or "").split()), output=len(gathered)
+        )
 
 
 class EmbedDemo(llm.EmbeddingModel):

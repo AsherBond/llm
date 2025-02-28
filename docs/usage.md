@@ -38,7 +38,7 @@ Will run a prompt of:
 ```
 <contents of myscript.py> explain this code
 ```
-For models that support them, {ref}`system prompts <system-prompts>` are a better tool for this kind of prompting.
+For models that support them, {ref}`system prompts <usage-system-prompts>` are a better tool for this kind of prompting.
 
 Some models support options. You can pass these using `-o/--option name value` - for example, to set the temperature to 1.5 run this:
 
@@ -88,7 +88,7 @@ LLM will attempt to automatically detect the content type of the image. If this 
 cat myfile | llm "describe this image" --at - image/jpeg
 ```
 
-(system-prompts)=
+(usage-system-prompts)=
 ### System prompts
 
 You can use `-s/--system '...'` to set a system prompt.
@@ -122,7 +122,64 @@ cat llm/utils.py | llm -t pytest
 ```
 See {ref}`prompt templates <prompt-templates>` for more.
 
-(conversation)=
+(usage-schemas)=
+### Schemas
+
+Some models include the ability to return JSON that matches a provided [JSON schema](https://json-schema.org/). Models from OpenAI, Anthropic and Google Gemini all include this capability.
+
+Take a look at the {ref}`schemas documentation <schemas>` for a detailed guide to using this feature.
+
+You can pass JSON schemas directly to the `--schema` option:
+
+```bash
+llm --schema '{
+  "type": "object",
+  "properties": {
+    "dogs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "bio": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}' -m gpt-4o-mini 'invent two dogs'
+```
+
+Or use LLM's custom {ref}`concise schema syntax <schemas-dsl>` like this:
+```bash
+llm --schema 'name,bio' 'invent a dog'
+```
+Two use the same concise schema for multiple items use `--schema-multi`:
+```bash
+llm --schema-multi 'name,bio' 'invent two dogs'
+```
+You can also save the JSON schema to a file and reference the filename using `--schema`:
+
+```bash
+llm --schema dogs.schema.json 'invent two dogs'
+```
+
+Or save your schema {ref}`to a template <prompt-templates>` like this:
+
+```bash
+llm --schema dogs.schema.json --save dogs
+# Then to use it:
+llm -t dogs 'invent two dogs'
+```
+
+Be warned that different models may support different dialects of the JSON schema specification.
+
+See {ref}`schemas-logs` for tips on using the `llm logs --schema X` command to access JSON objects you have previously logged using this option.
+
+(usage-conversation)=
 ### Continuing a conversation
 
 By default, the tool will start a new conversation each time you run it.
@@ -175,7 +232,7 @@ Run `llm chat`, optionally with a `-m model_id`, to start a chat conversation:
 ```bash
 llm chat -m chatgpt
 ```
-Each chat starts a new conversation. A record of each conversation can be accessed through {ref}`the logs <logs-conversation>`.
+Each chat starts a new conversation. A record of each conversation can be accessed through {ref}`the logs <logging-conversation>`.
 
 You can pass `-c` to start a conversation as a continuation of your most recent prompt. This will automatically use the most recently used model:
 
@@ -308,6 +365,10 @@ OpenAI Chat: gpt-4o (aliases: 4o)
       Output a valid JSON object {...}. Prompt must mention JSON.
   Attachment types:
     image/gif, image/jpeg, image/png, image/webp
+  Features:
+  - streaming
+  - schemas
+  - async
 OpenAI Chat: chatgpt-4o-latest (aliases: chatgpt-4o)
   Options:
     temperature: float
@@ -321,6 +382,9 @@ OpenAI Chat: chatgpt-4o-latest (aliases: chatgpt-4o)
     json_object: boolean
   Attachment types:
     image/gif, image/jpeg, image/png, image/webp
+  Features:
+  - streaming
+  - async
 OpenAI Chat: gpt-4o-mini (aliases: 4o-mini)
   Options:
     temperature: float
@@ -334,6 +398,10 @@ OpenAI Chat: gpt-4o-mini (aliases: 4o-mini)
     json_object: boolean
   Attachment types:
     image/gif, image/jpeg, image/png, image/webp
+  Features:
+  - streaming
+  - schemas
+  - async
 OpenAI Chat: gpt-4o-audio-preview
   Options:
     temperature: float
@@ -347,6 +415,9 @@ OpenAI Chat: gpt-4o-audio-preview
     json_object: boolean
   Attachment types:
     audio/mpeg, audio/wav
+  Features:
+  - streaming
+  - async
 OpenAI Chat: gpt-4o-audio-preview-2024-12-17
   Options:
     temperature: float
@@ -360,6 +431,9 @@ OpenAI Chat: gpt-4o-audio-preview-2024-12-17
     json_object: boolean
   Attachment types:
     audio/mpeg, audio/wav
+  Features:
+  - streaming
+  - async
 OpenAI Chat: gpt-4o-audio-preview-2024-10-01
   Options:
     temperature: float
@@ -373,6 +447,9 @@ OpenAI Chat: gpt-4o-audio-preview-2024-10-01
     json_object: boolean
   Attachment types:
     audio/mpeg, audio/wav
+  Features:
+  - streaming
+  - async
 OpenAI Chat: gpt-4o-mini-audio-preview
   Options:
     temperature: float
@@ -386,6 +463,9 @@ OpenAI Chat: gpt-4o-mini-audio-preview
     json_object: boolean
   Attachment types:
     audio/mpeg, audio/wav
+  Features:
+  - streaming
+  - async
 OpenAI Chat: gpt-4o-mini-audio-preview-2024-12-17
   Options:
     temperature: float
@@ -399,6 +479,9 @@ OpenAI Chat: gpt-4o-mini-audio-preview-2024-12-17
     json_object: boolean
   Attachment types:
     audio/mpeg, audio/wav
+  Features:
+  - streaming
+  - async
 OpenAI Chat: gpt-3.5-turbo (aliases: 3.5, chatgpt)
   Options:
     temperature: float
@@ -410,6 +493,9 @@ OpenAI Chat: gpt-3.5-turbo (aliases: 3.5, chatgpt)
     logit_bias: dict, str
     seed: int
     json_object: boolean
+  Features:
+  - streaming
+  - async
 OpenAI Chat: gpt-3.5-turbo-16k (aliases: chatgpt-16k, 3.5-16k)
   Options:
     temperature: float
@@ -421,6 +507,9 @@ OpenAI Chat: gpt-3.5-turbo-16k (aliases: chatgpt-16k, 3.5-16k)
     logit_bias: dict, str
     seed: int
     json_object: boolean
+  Features:
+  - streaming
+  - async
 OpenAI Chat: gpt-4 (aliases: 4, gpt4)
   Options:
     temperature: float
@@ -432,6 +521,9 @@ OpenAI Chat: gpt-4 (aliases: 4, gpt4)
     logit_bias: dict, str
     seed: int
     json_object: boolean
+  Features:
+  - streaming
+  - async
 OpenAI Chat: gpt-4-32k (aliases: 4-32k)
   Options:
     temperature: float
@@ -443,6 +535,9 @@ OpenAI Chat: gpt-4-32k (aliases: 4-32k)
     logit_bias: dict, str
     seed: int
     json_object: boolean
+  Features:
+  - streaming
+  - async
 OpenAI Chat: gpt-4-1106-preview
   Options:
     temperature: float
@@ -454,6 +549,9 @@ OpenAI Chat: gpt-4-1106-preview
     logit_bias: dict, str
     seed: int
     json_object: boolean
+  Features:
+  - streaming
+  - async
 OpenAI Chat: gpt-4-0125-preview
   Options:
     temperature: float
@@ -465,6 +563,9 @@ OpenAI Chat: gpt-4-0125-preview
     logit_bias: dict, str
     seed: int
     json_object: boolean
+  Features:
+  - streaming
+  - async
 OpenAI Chat: gpt-4-turbo-2024-04-09
   Options:
     temperature: float
@@ -476,6 +577,9 @@ OpenAI Chat: gpt-4-turbo-2024-04-09
     logit_bias: dict, str
     seed: int
     json_object: boolean
+  Features:
+  - streaming
+  - async
 OpenAI Chat: gpt-4-turbo (aliases: gpt-4-turbo-preview, 4-turbo, 4t)
   Options:
     temperature: float
@@ -487,6 +591,43 @@ OpenAI Chat: gpt-4-turbo (aliases: gpt-4-turbo-preview, 4-turbo, 4t)
     logit_bias: dict, str
     seed: int
     json_object: boolean
+  Features:
+  - streaming
+  - async
+OpenAI Chat: gpt-4.5-preview-2025-02-27
+  Options:
+    temperature: float
+    max_tokens: int
+    top_p: float
+    frequency_penalty: float
+    presence_penalty: float
+    stop: str
+    logit_bias: dict, str
+    seed: int
+    json_object: boolean
+  Attachment types:
+    image/gif, image/jpeg, image/png, image/webp
+  Features:
+  - streaming
+  - schemas
+  - async
+OpenAI Chat: gpt-4.5-preview (aliases: gpt-4.5)
+  Options:
+    temperature: float
+    max_tokens: int
+    top_p: float
+    frequency_penalty: float
+    presence_penalty: float
+    stop: str
+    logit_bias: dict, str
+    seed: int
+    json_object: boolean
+  Attachment types:
+    image/gif, image/jpeg, image/png, image/webp
+  Features:
+  - streaming
+  - schemas
+  - async
 OpenAI Chat: o1
   Options:
     temperature: float
@@ -501,6 +642,9 @@ OpenAI Chat: o1
     reasoning_effort: str
   Attachment types:
     image/gif, image/jpeg, image/png, image/webp
+  Features:
+  - schemas
+  - async
 OpenAI Chat: o1-2024-12-17
   Options:
     temperature: float
@@ -515,6 +659,9 @@ OpenAI Chat: o1-2024-12-17
     reasoning_effort: str
   Attachment types:
     image/gif, image/jpeg, image/png, image/webp
+  Features:
+  - schemas
+  - async
 OpenAI Chat: o1-preview
   Options:
     temperature: float
@@ -526,6 +673,9 @@ OpenAI Chat: o1-preview
     logit_bias: dict, str
     seed: int
     json_object: boolean
+  Features:
+  - streaming
+  - async
 OpenAI Chat: o1-mini
   Options:
     temperature: float
@@ -537,6 +687,9 @@ OpenAI Chat: o1-mini
     logit_bias: dict, str
     seed: int
     json_object: boolean
+  Features:
+  - streaming
+  - async
 OpenAI Chat: o3-mini
   Options:
     temperature: float
@@ -549,6 +702,10 @@ OpenAI Chat: o3-mini
     seed: int
     json_object: boolean
     reasoning_effort: str
+  Features:
+  - streaming
+  - schemas
+  - async
 OpenAI Completion: gpt-3.5-turbo-instruct (aliases: 3.5-instruct, chatgpt-instruct)
   Options:
     temperature: float
@@ -580,7 +737,8 @@ OpenAI Completion: gpt-3.5-turbo-instruct (aliases: 3.5-instruct, chatgpt-instru
       Integer seed to attempt to sample deterministically
     logprobs: int
       Include the log probabilities of most likely N per token
-Default: gpt-4o-mini
+  Features:
+  - streaming
 
 ```
 <!-- [[[end]]] -->

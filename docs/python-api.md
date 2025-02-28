@@ -83,6 +83,57 @@ if "image/jpeg" in model.attachment_types:
     ...
 ```
 
+(python-api-schemas)=
+
+### Schemas
+
+As with {ref}`the CLI tool <usage-schemas>` some models support passing a JSON schema should be used for the resulting response.
+
+You can pass this to the `prompt(schema=)` parameter as either a Python dictionary or a [Pydantic](https://docs.pydantic.dev/) `BaseModel` subclass:
+
+```python
+import llm, json
+from pydantic import BaseModel
+
+class Dog(BaseModel):
+    name: str
+    age: int
+
+model = llm.get_model("gpt-4o-mini")
+response = model.prompt("Describe a nice dog", schema=Dog)
+dog = json.loads(response.text())
+print(dog)
+# {"name":"Buddy","age":3}
+```
+You can also pass a schema directly, like this:
+```python
+response = model.prompt("Describe a nice dog", schema={
+    "properties": {
+        "name": {"title": "Name", "type": "string"},
+        "age": {"title": "Age", "type": "integer"},
+    },
+    "required": ["name", "age"],
+    "title": "Dog",
+    "type": "object",
+})
+```
+
+You can also use LLM's {ref}`alternative schema syntax <schemas-dsl>` via the `llm.schema_dsl(schema_dsl)` function. This provides a quick way to construct a JSON schema for simple cases:
+
+```python
+print(model.prompt(
+    "Describe a nice dog with a surprising name",
+    schema=llm.schema_dsl("name, age int, bio")
+))
+```
+Pass `multi=True` to generate a schema that returns multiple items matching that specification:
+
+```python
+print(model.prompt(
+    "Describe 3 nice dogs with surprising names",
+    schema=llm.schema_dsl("name, age int, bio", multi=True)
+))
+```
 (python-api-model-options)=
 
 ### Model options

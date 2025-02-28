@@ -3,7 +3,9 @@
 
 Prompt templates can be created to reuse useful prompts with different input data.
 
-## Getting started
+(prompt-templates-save)=
+
+## Getting started with --save
 
 The easiest way to create a template is using the `--save template_name` option.
 
@@ -26,11 +28,21 @@ You can also save default parameters:
 llm --system 'Summarize this text in the voice of $voice' \
   --model gpt-4 -p voice GlaDOS --save summarize
 ```
+
+Add `--schema` to bake a {ref}`schema <usage-schemas>` into your template:
+
+```bash
+llm --schema dog.schema.json 'invent a dog' --save dog
+```
+
 If you add `--extract` the setting to  {ref}`extract the first fenced code block <usage-extract-fenced-code>` will be persisted in the template.
 ```bash
 llm --system 'write a Python function' --extract --save python-function
 llm -t python-function 'reverse a string'
 ```
+
+(prompt-templates-using)=
+
 ## Using a template
 
 You can execute a named template using the `-t/--template` option:
@@ -44,6 +56,9 @@ This can be combined with the `-m` option to specify a different model:
 curl -s https://llm.datasette.io/en/latest/ | \
   llm -t summarize -m gpt-3.5-turbo-16k
 ```
+
+(prompt-templates-list)=
+
 ## Listing available templates
 
 This command lists all available templates:
@@ -55,6 +70,8 @@ The output looks something like this:
 cmd        : system: reply with macos terminal commands only, no extra information
 glados     : system: You are GlaDOS prompt: Summarize this: $input
 ```
+
+(prompt-templates-yaml)=
 
 ## Templates as YAML files
 
@@ -68,15 +85,18 @@ This will open the system default editor.
 
 :::{tip}
 You can control which editor will be used here using the `EDITOR` environment variable - for example, to use VS Code:
-
-    export EDITOR="code -w"
-
+```bash
+export EDITOR="code -w"
+```
 Add that to your `~/.zshrc` or `~/.bashrc` file depending on which shell you use (`zsh` is the default on macOS since macOS Catalina in 2019).
 :::
 
 You can also create a file called `summary.yaml` in the folder shown by running `llm templates path`, for example:
 ```bash
-$ llm templates path
+llm templates path
+```
+Example output:
+```
 /Users/simon/Library/Application Support/io.datasette.llm/templates
 ```
 
@@ -105,7 +125,9 @@ curl -s 'https://til.simonwillison.net/macos/imovie-slides-and-audio' | \
 Output:
 > In a fantastical steampunk world, Simon Willison decided to merge an old MP3 recording with slides from the talk using iMovie. After exporting the slides as images and importing them into iMovie, he had to disable the default Ken Burns effect using the "Crop" tool. Then, Simon manually synchronized the audio by adjusting the duration of each image. Finally, he published the masterpiece to YouTube, with the whimsical magic of steampunk-infused illustrations leaving his viewers in awe.
 
-### System templates
+(prompt-templates-system)=
+
+### System prompts
 
 When working with models that support system prompts (such as `gpt-3.5-turbo` and `gpt-4`) you can set a system prompt using a `system:` key like so:
 
@@ -120,6 +142,30 @@ You can combine system and regular prompts like so:
 system: You speak like an excitable Victorian adventurer
 prompt: 'Summarize this: $input'
 ```
+
+(prompt-templates-schemas)=
+
+### Schemas
+
+Use the `schema_object:` key to embed a JSON schema (as YAML) in your template. The easiest way to create these is with the `llm --schema ... --save name-of-template` command - the result should look something like this:
+
+```yaml
+name: dogs
+schema_object:
+    properties:
+        dogs:
+            items:
+                properties:
+                    bio:
+                        type: string
+                    name:
+                        type: string
+                type: object
+            type: array
+    type: object
+```
+
+(prompt-templates-variables)=
 
 ### Additional template variables
 
@@ -162,6 +208,7 @@ I got this:
 > My previous test subject seemed to have learned something new about iMovie. They exported keynote slides as individual images [...] Quite impressive for a human.
 
 (prompt-default-parameters)=
+
 ### Specifying default parameters
 
 You can also specify default values for parameters, using a `defaults:` key.
@@ -190,6 +237,8 @@ I got this:
 
 > Text, summarize in Yoda's voice, I will: "Hmm, young padawan. Summary of this text, you seek. Hmmm. ...
 
+(prompt-templates-extract)=
+
 ### Configuring code extraction
 
 To configure the {ref}`extract first fenced code block <usage-extract-fenced-code>` setting for the template, add this:
@@ -197,6 +246,8 @@ To configure the {ref}`extract first fenced code block <usage-extract-fenced-cod
 ```yaml
 extract: true
 ```
+
+(prompt-templates-default-model)=
 
 ### Setting a default model for a template
 

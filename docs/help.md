@@ -77,7 +77,8 @@ Commands:
   models        Manage available models
   openai        Commands for working directly with the OpenAI API
   plugins       List installed plugins
-  similar       Return top N similar IDs from a collection
+  schemas       Manage stored schemas
+  similar       Return top N similar IDs from a collection using cosine...
   templates     Manage stored prompt templates
   uninstall     Uninstall Python packages from the LLM environment
 ```
@@ -117,6 +118,8 @@ Options:
   --at, --attachment-type <TEXT TEXT>...
                                   Attachment with explicit mimetype
   -o, --option <TEXT TEXT>...     key/value options for the model
+  --schema TEXT                   JSON schema, filepath or ID
+  --schema-multi TEXT             JSON schema to use for multiple results
   -t, --template TEXT             Template to use
   -p, --param <TEXT TEXT>...      Parameters for template
   --no-stream                     Do not stream output
@@ -299,6 +302,12 @@ Options:
   -p, --path FILE             Path to log database
   -m, --model TEXT            Filter by model or model alias
   -q, --query TEXT            Search for logs matching this string
+  --schema TEXT               JSON schema, filepath or ID
+  --schema-multi TEXT         JSON schema used for multiple results
+  --data                      Output newline-delimited JSON data for schema
+  --data-array                Output JSON array of data for schema
+  --data-key TEXT             Return JSON objects from array in this key
+  --data-ids                  Attach corresponding IDs to JSON objects
   -t, --truncate              Truncate long strings in output
   -s, --short                 Shorter YAML output with truncated prompts
   -u, --usage                 Include token usage
@@ -307,6 +316,8 @@ Options:
   --xl, --extract-last        Extract last fenced code block
   -c, --current               Show logs from the current conversation
   --cid, --conversation TEXT  Show logs for this conversation ID
+  --id-gt TEXT                Return responses with ID > this
+  --id-gte TEXT               Return responses with ID >= this
   --json                      Output logs as JSON
   --help                      Show this message and exit.
 ```
@@ -336,6 +347,7 @@ Usage: llm models list [OPTIONS]
 Options:
   --options         Show options for each model, if available
   --async           List async models
+  --schemas         List models that support schemas
   -q, --query TEXT  Search for models matching these strings
   --help            Show this message and exit.
 ```
@@ -410,6 +422,62 @@ Usage: llm templates path [OPTIONS]
 
 Options:
   --help  Show this message and exit.
+```
+
+(help-schemas)=
+### llm schemas --help
+```
+Usage: llm schemas [OPTIONS] COMMAND [ARGS]...
+
+  Manage stored schemas
+
+Options:
+  --help  Show this message and exit.
+
+Commands:
+  list*  List stored schemas
+  dsl    Convert LLM's schema DSL to a JSON schema
+  show   Show a stored schema
+```
+
+(help-schemas-list)=
+#### llm schemas list --help
+```
+Usage: llm schemas list [OPTIONS]
+
+  List stored schemas
+
+Options:
+  -p, --path FILE   Path to log database
+  -q, --query TEXT  Search for schemas matching this string
+  --full            Output full schema contents
+  --help            Show this message and exit.
+```
+
+(help-schemas-show)=
+#### llm schemas show --help
+```
+Usage: llm schemas show [OPTIONS] SCHEMA_ID
+
+  Show a stored schema
+
+Options:
+  -p, --path FILE  Path to log database
+  --help           Show this message and exit.
+```
+
+(help-schemas-dsl)=
+#### llm schemas dsl --help
+```
+Usage: llm schemas dsl [OPTIONS] INPUT
+
+  Convert LLM's schema DSL to a JSON schema
+
+      llm schema dsl 'name, age int, bio: their bio'
+
+Options:
+  --multi  Wrap in an array
+  --help   Show this message and exit.
 ```
 
 (help-aliases)=
@@ -591,7 +659,7 @@ Options:
 ```
 Usage: llm similar [OPTIONS] COLLECTION [ID]
 
-  Return top N similar IDs from a collection
+  Return top N similar IDs from a collection using cosine similarity.
 
   Example usage:
 

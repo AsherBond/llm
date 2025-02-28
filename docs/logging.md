@@ -46,7 +46,7 @@ Number of responses logged:     48
 Database file size:             19.96MB
 ```
 
-(viewing-logs)=
+(logging-view)=
 
 ## Viewing the logs
 
@@ -85,7 +85,7 @@ Or `-n 0` to see everything that has ever been logged:
 ```bash
 llm logs -n 0
 ```
-You can truncate the display of the prompts and responses using the `-t/--truncate` option. This can help make the JSON output more readable:
+You can truncate the display of the prompts and responses using the `-t/--truncate` option. This can help make the JSON output more readable - though the `--short` option is usually better.
 ```bash
 llm logs -n 1 -t --json
 ```
@@ -154,10 +154,11 @@ Example output:
         reasoning_tokens: 2240
 ```
 
-(logs-conversation)=
+(logging-conversation)=
+
 ### Logs for a conversation
 
-To view the logs for the most recent {ref}`conversation <conversation>` you have had with a model, use `-c`:
+To view the logs for the most recent {ref}`conversation <usage-conversation>` you have had with a model, use `-c`:
 
 ```bash
 llm logs -c
@@ -168,6 +169,8 @@ To see logs for a specific conversation based on its ID, use `--cid ID` or `--co
 llm logs --cid 01h82n0q9crqtnzmf13gkyxawg
 ```
 
+(logging-search)=
+
 ### Searching the logs
 
 You can search the logs for a search term in the `prompt` or the `response` columns.
@@ -176,12 +179,29 @@ llm logs -q 'cheesecake'
 ```
 The most relevant terms will be shown at the bottom of the output.
 
+(logging-filter-id)=
+
+### Filtering past a specific ID
+
+If you want to retrieve all of the logs that were recorded since a specific response ID you can do so using these options:
+
+- `--id-gt $ID` - every record with an ID greater than $ID
+- `--id-gte $ID` - every record with an ID greater than or equal to $ID
+
+IDs are always issued in ascending order by time, so this provides a useful way to see everything that has happened since a particular record.
+
+This can be particularly useful when {ref}`working with schema data <schemas-logs>`, where you might want to access every record that you have created using a specific `--schema` but exclude records you have previously processed.
+
+(logging-filter-model)=
+
 ### Filtering by model
 
 You can filter to logs just for a specific model (or model alias) using `-m/--model`:
 ```bash
 llm logs -m chatgpt
 ```
+
+(logging-datasette)=
 
 ### Browsing logs using Datasette
 
@@ -190,6 +210,13 @@ You can also use [Datasette](https://datasette.io/) to browse your logs like thi
 ```bash
 datasette "$(llm logs path)"
 ```
+
+### Browsing data collected using schemas
+
+The `--schema X` option can be used to view responses that used the specified schema. This can be combined with `--data` and `--data-array` and `--data-key` to extract just the returned JSON data - consult the {ref}`schemas documentation <schemas-logs>` for details.
+
+(logging-sql-schema)=
+
 ## SQL schema
 
 Here's the SQL schema used by the `logs.db` database:
@@ -209,7 +236,7 @@ def cleanup_sql(sql):
     return first_line + '(\n  ' + ',\n  '.join(columns) + '\n);'
 
 cog.out("```sql\n")
-for table in ("conversations", "responses", "responses_fts", "attachments", "prompt_attachments"):
+for table in ("conversations", "schemas", "responses", "responses_fts", "attachments", "prompt_attachments"):
     schema = db[table].schema
     cog.out(format(cleanup_sql(schema)))
     cog.out("\n")
@@ -221,7 +248,11 @@ CREATE TABLE [conversations] (
   [name] TEXT,
   [model] TEXT
 );
-CREATE TABLE [responses] (
+CREATE TABLE [schemas] (
+  [id] TEXT PRIMARY KEY,
+  [content] TEXT
+);
+CREATE TABLE "responses" (
   [id] TEXT PRIMARY KEY,
   [model] TEXT,
   [prompt] TEXT,
@@ -235,7 +266,8 @@ CREATE TABLE [responses] (
   [datetime_utc] TEXT,
   [input_tokens] INTEGER,
   [output_tokens] INTEGER,
-  [token_details] TEXT
+  [token_details] TEXT,
+  [schema_id] TEXT REFERENCES [schemas]([id])
 );
 CREATE VIRTUAL TABLE [responses_fts] USING FTS5 (
   [prompt],

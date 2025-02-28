@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 import string
 from typing import Optional, Any, Dict, List, Tuple
 
@@ -12,9 +12,9 @@ class Template(BaseModel):
     # Should a fenced code block be extracted?
     extract: Optional[bool] = None
     extract_last: Optional[bool] = None
+    schema_object: Optional[dict] = None
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
     class MissingVariables(Exception):
         pass

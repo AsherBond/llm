@@ -1,10 +1,13 @@
 import click
+import hashlib
 import httpx
 import json
+import pathlib
 import puremagic
 import re
+import sqlite_utils
 import textwrap
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional, Tuple
 
 MIME_TYPE_FIXES = {
     "audio/wave": "audio/wav",
@@ -192,3 +195,199 @@ def extract_fenced_code_block(text: str, last: bool = False) -> Optional[str]:
         match = matches[-1] if last else matches[0]
         return match.group("code")
     return None
+
+
+def make_schema_id(schema: dict) -> Tuple[str, str]:
+    schema_json = json.dumps(schema, separators=(",", ":"))
+    schema_id = hashlib.blake2b(schema_json.encode(), digest_size=16).hexdigest()
+    return schema_id, schema_json
+
+
+def output_rows_as_json(rows, nl=False):
+    """
+    Output rows as JSON - either newline-delimited or an array
+
+    Parameters:
+    - rows: List of dictionaries to output
+    - nl: Boolean, if True, use newline-delimited JSON
+
+    Returns:
+    - String with formatted JSON output
+    """
+    if not rows:
+        return "" if nl else "[]"
+
+    lines = []
+    end_i = len(rows) - 1
+    for i, row in enumerate(rows):
+        is_first = i == 0
+        is_last = i == end_i
+
+        line = "{firstchar}{serialized}{maybecomma}{lastchar}".format(
+            firstchar=("[" if is_first else " ") if not nl else "",
+            serialized=json.dumps(row),
+            maybecomma="," if (not nl and not is_last) else "",
+            lastchar="]" if (is_last and not nl) else "",
+        )
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def resolve_schema_input(db, schema_input, load_template):
+    # schema_input might be JSON or a filepath or an ID or t:name
+    if not schema_input:
+        return
+    if schema_input.strip().startswith("t:"):
+        name = schema_input.strip()[2:]
+        template = load_template(name)
+        if not template.schema_object:
+            raise click.ClickException("Template '{}' has no schema".format(name))
+        return template.schema_object
+    if schema_input.strip().startswith("{"):
+        try:
+            return json.loads(schema_input)
+        except ValueError:
+            pass
+    if " " in schema_input.strip() or "," in schema_input:
+        # Treat it as schema DSL
+        return schema_dsl(schema_input)
+    # Is it a file on disk?
+    path = pathlib.Path(schema_input)
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except ValueError:
+            raise click.ClickException("Schema file contained invalid JSON")
+    # Last attempt: is it an ID in the DB?
+    try:
+        row = db["schemas"].get(schema_input)
+        return json.loads(row["content"])
+    except (sqlite_utils.db.NotFoundError, ValueError):
+        raise click.BadParameter("Invalid schema")
+
+
+def schema_summary(schema: dict) -> str:
+    """
+    Extract property names from a JSON schema and format them in a
+    concise way that highlights the array/object structure.
+
+    Args:
+        schema (dict): A JSON schema dictionary
+
+    Returns:
+        str: A human-friendly summary of the schema structure
+    """
+    if not schema or not isinstance(schema, dict):
+        return ""
+
+    schema_type = schema.get("type", "")
+
+    if schema_type == "object":
+        props = schema.get("properties", {})
+        prop_summaries = []
+
+        for name, prop_schema in props.items():
+            prop_type = prop_schema.get("type", "")
+
+            if prop_type == "array":
+                items = prop_schema.get("items", {})
+                items_summary = schema_summary(items)
+                prop_summaries.append(f"{name}: [{items_summary}]")
+            elif prop_type == "object":
+                nested_summary = schema_summary(prop_schema)
+                prop_summaries.append(f"{name}: {nested_summary}")
+            else:
+                prop_summaries.append(name)
+
+        return "{" + ", ".join(prop_summaries) + "}"
+
+    elif schema_type == "array":
+        items = schema.get("items", {})
+        return schema_summary(items)
+
+    return ""
+
+
+def schema_dsl(schema_dsl: str, multi: bool = False) -> Dict[str, Any]:
+    """
+    Build a JSON schema from a concise schema string.
+
+    Args:
+        schema_dsl: A string representing a schema in the concise format.
+            Can be comma-separated or newline-separated.
+        multi: Boolean, return a schema for an "items" array of these
+
+    Returns:
+        A dictionary representing the JSON schema.
+    """
+    # Type mapping dictionary
+    type_mapping = {
+        "int": "integer",
+        "float": "number",
+        "bool": "boolean",
+        "str": "string",
+    }
+
+    # Initialize the schema dictionary with required elements
+    json_schema: Dict[str, Any] = {"type": "object", "properties": {}, "required": []}
+
+    # Check if the schema is newline-separated or comma-separated
+    if "\n" in schema_dsl:
+        fields = [field.strip() for field in schema_dsl.split("\n") if field.strip()]
+    else:
+        fields = [field.strip() for field in schema_dsl.split(",") if field.strip()]
+
+    # Process each field
+    for field in fields:
+        # Extract field name, type, and description
+        if ":" in field:
+            field_info, description = field.split(":", 1)
+            description = description.strip()
+        else:
+            field_info = field
+            description = ""
+
+        # Process field name and type
+        field_parts = field_info.strip().split()
+        field_name = field_parts[0].strip()
+
+        # Default type is string
+        field_type = "string"
+
+        # If type is specified, use it
+        if len(field_parts) > 1:
+            type_indicator = field_parts[1].strip()
+            if type_indicator in type_mapping:
+                field_type = type_mapping[type_indicator]
+
+        # Add field to properties
+        json_schema["properties"][field_name] = {"type": field_type}
+
+        # Add description if provided
+        if description:
+            json_schema["properties"][field_name]["description"] = description
+
+        # Add field to required list
+        json_schema["required"].append(field_name)
+
+    if multi:
+        return multi_schema(json_schema)
+    else:
+        return json_schema
+
+
+def multi_schema(schema: dict) -> dict:
+    "Wrap JSON schema in an 'items': [] array"
+    return {
+        "type": "object",
+        "properties": {"items": {"type": "array", "items": schema}},
+        "required": ["items"],
+    }
+
+
+def find_unused_key(item: dict, key: str) -> str:
+    'Return unused key, e.g. for {"id": "1"} and key "id" returns "id_"'
+    while key in item:
+        key += "_"
+    return key

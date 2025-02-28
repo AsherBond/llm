@@ -1,17 +1,13 @@
 from click.testing import CliRunner
-import datetime
 import llm
 from llm.cli import cli
-from llm.migrations import migrate
 from llm.models import Usage
 import json
 import os
 import pathlib
+from pydantic import BaseModel
 import pytest
-import re
 import sqlite_utils
-import sys
-from ulid import ULID
 from unittest import mock
 
 
@@ -21,256 +17,6 @@ def test_version():
         result = runner.invoke(cli, ["--version"])
         assert result.exit_code == 0
         assert result.output.startswith("cli, version ")
-
-
-@pytest.fixture
-def log_path(user_path):
-    log_path = str(user_path / "logs.db")
-    db = sqlite_utils.Database(log_path)
-    migrate(db)
-    start = datetime.datetime.now(datetime.timezone.utc)
-    db["responses"].insert_all(
-        {
-            "id": str(ULID()).lower(),
-            "system": "system",
-            "prompt": "prompt",
-            "response": 'response\n```python\nprint("hello word")\n```',
-            "model": "davinci",
-            "datetime_utc": (start + datetime.timedelta(seconds=i)).isoformat(),
-            "conversation_id": "abc123",
-            "input_tokens": 2,
-            "output_tokens": 5,
-        }
-        for i in range(100)
-    )
-    return log_path
-
-
-datetime_re = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
-
-
-@pytest.mark.parametrize("usage", (False, True))
-def test_logs_text(log_path, usage):
-    runner = CliRunner()
-    args = ["logs", "-p", str(log_path)]
-    if usage:
-        args.append("-u")
-    result = runner.invoke(cli, args, catch_exceptions=False)
-    assert result.exit_code == 0
-    output = result.output
-    # Replace 2023-08-17T20:53:58 with YYYY-MM-DDTHH:MM:SS
-    output = datetime_re.sub("YYYY-MM-DDTHH:MM:SS", output)
-    expected = (
-        (
-            "# YYYY-MM-DDTHH:MM:SS    conversation: abc123\n\n"
-            "Model: **davinci**\n\n"
-            "## Prompt:\n\n"
-            "prompt\n\n"
-            "## System:\n\n"
-            "system\n\n"
-            "## Response:\n\n"
-            'response\n```python\nprint("hello word")\n```\n\n'
-        )
-        + ("## Token usage:\n\n2 input, 5 output\n\n" if usage else "")
-        + (
-            "# YYYY-MM-DDTHH:MM:SS    conversation: abc123\n\n"
-            "Model: **davinci**\n\n"
-            "## Prompt:\n\n"
-            "prompt\n\n"
-            "## Response:\n\n"
-            'response\n```python\nprint("hello word")\n```\n\n'
-        )
-        + ("## Token usage:\n\n2 input, 5 output\n\n" if usage else "")
-        + (
-            "# YYYY-MM-DDTHH:MM:SS    conversation: abc123\n\n"
-            "Model: **davinci**\n\n"
-            "## Prompt:\n\n"
-            "prompt\n\n"
-            "## Response:\n\n"
-            'response\n```python\nprint("hello word")\n```\n\n'
-        )
-        + ("## Token usage:\n\n2 input, 5 output\n\n" if usage else "")
-    )
-    assert output == expected
-
-
-@pytest.mark.parametrize("n", (None, 0, 2))
-def test_logs_json(n, log_path):
-    "Test that logs command correctly returns requested -n records"
-    runner = CliRunner()
-    args = ["logs", "-p", str(log_path), "--json"]
-    if n is not None:
-        args.extend(["-n", str(n)])
-    result = runner.invoke(cli, args, catch_exceptions=False)
-    assert result.exit_code == 0
-    logs = json.loads(result.output)
-    expected_length = 3
-    if n is not None:
-        if n == 0:
-            expected_length = 100
-        else:
-            expected_length = n
-    assert len(logs) == expected_length
-
-
-@pytest.mark.parametrize(
-    "args", (["-r"], ["--response"], ["list", "-r"], ["list", "--response"])
-)
-def test_logs_response_only(args, log_path):
-    "Test that logs -r/--response returns just the last response"
-    runner = CliRunner()
-    result = runner.invoke(cli, ["logs"] + args, catch_exceptions=False)
-    assert result.exit_code == 0
-    assert result.output == 'response\n```python\nprint("hello word")\n```\n'
-
-
-@pytest.mark.parametrize(
-    "args",
-    (
-        ["-x"],
-        ["--extract"],
-        ["list", "-x"],
-        ["list", "--extract"],
-        # Using -xr together should have same effect as just -x
-        ["-xr"],
-        ["-x", "-r"],
-        ["--extract", "--response"],
-    ),
-)
-def test_logs_extract_first_code(args, log_path):
-    "Test that logs -x/--extract returns the first code block"
-    runner = CliRunner()
-    result = runner.invoke(cli, ["logs"] + args, catch_exceptions=False)
-    assert result.exit_code == 0
-    assert result.output == 'print("hello word")\n\n'
-
-
-@pytest.mark.parametrize(
-    "args",
-    (
-        ["--xl"],
-        ["--extract-last"],
-        ["list", "--xl"],
-        ["list", "--extract-last"],
-        ["--xl", "-r"],
-        ["-x", "--xl"],
-    ),
-)
-def test_logs_extract_last_code(args, log_path):
-    "Test that logs --xl/--extract-last returns the last code block"
-    runner = CliRunner()
-    result = runner.invoke(cli, ["logs"] + args, catch_exceptions=False)
-    assert result.exit_code == 0
-    assert result.output == 'print("hello word")\n\n'
-
-
-@pytest.mark.parametrize("arg", ("-s", "--short"))
-@pytest.mark.parametrize("usage", (None, "-u", "--usage"))
-def test_logs_short(log_path, arg, usage):
-    runner = CliRunner()
-    args = ["logs", arg, "-p", str(log_path)]
-    if usage:
-        args.append(usage)
-    result = runner.invoke(cli, args)
-    assert result.exit_code == 0
-    output = datetime_re.sub("YYYY-MM-DDTHH:MM:SS", result.output)
-    expected_usage = ""
-    if usage:
-        expected_usage = "  usage:\n    input: 2\n    output: 5\n"
-    expected = (
-        "- model: davinci\n"
-        "  datetime: 'YYYY-MM-DDTHH:MM:SS'\n"
-        "  conversation: abc123\n"
-        "  system: system\n"
-        f"  prompt: prompt\n{expected_usage}"
-        "- model: davinci\n"
-        "  datetime: 'YYYY-MM-DDTHH:MM:SS'\n"
-        "  conversation: abc123\n"
-        "  system: system\n"
-        f"  prompt: prompt\n{expected_usage}"
-        "- model: davinci\n"
-        "  datetime: 'YYYY-MM-DDTHH:MM:SS'\n"
-        "  conversation: abc123\n"
-        "  system: system\n"
-        f"  prompt: prompt\n{expected_usage}"
-    )
-    assert output == expected
-
-
-@pytest.mark.xfail(sys.platform == "win32", reason="Expected to fail on Windows")
-@pytest.mark.parametrize("env", ({}, {"LLM_USER_PATH": "/tmp/llm-user-path"}))
-def test_logs_path(monkeypatch, env, user_path):
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    runner = CliRunner()
-    result = runner.invoke(cli, ["logs", "path"])
-    assert result.exit_code == 0
-    if env:
-        expected = env["LLM_USER_PATH"] + "/logs.db"
-    else:
-        expected = str(user_path) + "/logs.db"
-    assert result.output.strip() == expected
-
-
-@pytest.mark.parametrize("model", ("davinci", "curie"))
-def test_logs_filtered(user_path, model):
-    log_path = str(user_path / "logs.db")
-    db = sqlite_utils.Database(log_path)
-    migrate(db)
-    db["responses"].insert_all(
-        {
-            "id": str(ULID()).lower(),
-            "system": "system",
-            "prompt": "prompt",
-            "response": "response",
-            "model": "davinci" if i % 2 == 0 else "curie",
-        }
-        for i in range(100)
-    )
-    runner = CliRunner()
-    result = runner.invoke(cli, ["logs", "list", "-m", model, "--json"])
-    assert result.exit_code == 0
-    records = json.loads(result.output.strip())
-    assert all(record["model"] == model for record in records)
-
-
-@pytest.mark.parametrize(
-    "query,extra_args,expected",
-    (
-        # With no search term order should be by datetime
-        ("", [], ["doc1", "doc2", "doc3"]),
-        # With a search it's order by rank instead
-        ("llama", [], ["doc1", "doc3"]),
-        ("alpaca", [], ["doc2"]),
-        # Model filter should work too
-        ("llama", ["-m", "davinci"], ["doc1", "doc3"]),
-        ("llama", ["-m", "davinci2"], []),
-    ),
-)
-def test_logs_search(user_path, query, extra_args, expected):
-    log_path = str(user_path / "logs.db")
-    db = sqlite_utils.Database(log_path)
-    migrate(db)
-
-    def _insert(id, text):
-        db["responses"].insert(
-            {
-                "id": id,
-                "system": "system",
-                "prompt": text,
-                "response": "response",
-                "model": "davinci",
-            }
-        )
-
-    _insert("doc1", "llama")
-    _insert("doc2", "alpaca")
-    _insert("doc3", "llama llama")
-    runner = CliRunner()
-    result = runner.invoke(cli, ["logs", "list", "-q", query, "--json"] + extra_args)
-    assert result.exit_code == 0
-    records = json.loads(result.output.strip())
-    assert [record["id"] for record in records] == expected
 
 
 def test_llm_prompt_creates_log_database(mocked_openai_chat, tmpdir, monkeypatch):
@@ -808,6 +554,128 @@ def test_mock_model(mock_model):
     assert response2.usage() == Usage(input=2, output=1, details=None)
 
 
+class Dog(BaseModel):
+    name: str
+    age: int
+
+
+dog_schema = {
+    "properties": {
+        "name": {"title": "Name", "type": "string"},
+        "age": {"title": "Age", "type": "integer"},
+    },
+    "required": ["name", "age"],
+    "title": "Dog",
+    "type": "object",
+}
+dog = {"name": "Cleo", "age": 10}
+
+
+@pytest.mark.parametrize("use_pydantic", (False, True))
+def test_schema(mock_model, use_pydantic):
+    assert dog_schema == Dog.model_json_schema()
+    mock_model.enqueue([json.dumps(dog)])
+    response = mock_model.prompt(
+        "invent a dog", schema=Dog if use_pydantic else dog_schema
+    )
+    assert json.loads(response.text()) == dog
+    assert response.prompt.schema == dog_schema
+
+
+@pytest.mark.parametrize("use_filename", (True, False))
+def test_schema_via_cli(mock_model, tmpdir, monkeypatch, use_filename):
+    user_path = tmpdir / "user"
+    schema_path = tmpdir / "schema.json"
+    mock_model.enqueue([json.dumps(dog)])
+    schema_value = '{"schema": "one"}'
+    open(schema_path, "w").write(schema_value)
+    monkeypatch.setenv("LLM_USER_PATH", str(user_path))
+    if use_filename:
+        schema_value = str(schema_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--schema", schema_value, "prompt", "-m", "mock"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert result.output == '{"name": "Cleo", "age": 10}\n'
+    # Should have created user_path and put a logs.db in it
+    assert (user_path / "logs.db").exists()
+    rows = list(sqlite_utils.Database(str(user_path / "logs.db"))["schemas"].rows)
+    assert rows == [
+        {"id": "9a8ed2c9b17203f6d8905147234475b5", "content": '{"schema":"one"}'}
+    ]
+    if use_filename:
+        # Run it again to check that the ID option works now it's in the DB
+        result2 = runner.invoke(
+            cli,
+            ["--schema", "9a8ed2c9b17203f6d8905147234475b5", "prompt", "-m", "mock"],
+            catch_exceptions=False,
+        )
+        assert result2.exit_code == 0
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    (
+        (
+            ["--schema", "name, age int"],
+            {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+                "required": ["name", "age"],
+            },
+        ),
+        (
+            ["--schema-multi", "name, age int"],
+            {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "age": {"type": "integer"},
+                            },
+                            "required": ["name", "age"],
+                        },
+                    }
+                },
+                "required": ["items"],
+            },
+        ),
+    ),
+)
+def test_schema_using_dsl(mock_model, tmpdir, monkeypatch, args, expected):
+    user_path = tmpdir / "user"
+    mock_model.enqueue([json.dumps(dog)])
+    monkeypatch.setenv("LLM_USER_PATH", str(user_path))
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["prompt", "-m", "mock"] + args,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert result.output == '{"name": "Cleo", "age": 10}\n'
+    rows = list(sqlite_utils.Database(str(user_path / "logs.db"))["schemas"].rows)
+    assert json.loads(rows[0]["content"]) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_pydantic", (False, True))
+async def test_schema_async(async_mock_model, use_pydantic):
+    async_mock_model.enqueue([json.dumps(dog)])
+    response = async_mock_model.prompt(
+        "invent a dog", schema=Dog if use_pydantic else dog_schema
+    )
+    assert json.loads(await response.text()) == dog
+    assert response.prompt.schema == dog_schema
+
+
 def test_mock_key_model(mock_key_model):
     response = mock_key_model.prompt(prompt="hello", key="hi")
     assert response.text() == "key: hi"
@@ -833,3 +701,37 @@ def test_sync_on_done(mock_model):
     assert len(caught) == 0
     str(response)
     assert len(caught) == 1
+
+
+def test_schemas_dsl():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["schemas", "dsl", "name, age int, bio: short bio"])
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"},
+            "bio": {"type": "string", "description": "short bio"},
+        },
+        "required": ["name", "age", "bio"],
+    }
+    result2 = runner.invoke(cli, ["schemas", "dsl", "name, age int", "--multi"])
+    assert result2.exit_code == 0
+    assert json.loads(result2.output) == {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "age": {"type": "integer"},
+                    },
+                    "required": ["name", "age"],
+                },
+            }
+        },
+        "required": ["items"],
+    }

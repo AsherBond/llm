@@ -47,6 +47,8 @@ OpenAI Chat: gpt-4-1106-preview
 OpenAI Chat: gpt-4-0125-preview
 OpenAI Chat: gpt-4-turbo-2024-04-09
 OpenAI Chat: gpt-4-turbo (aliases: gpt-4-turbo-preview, 4-turbo, 4t)
+OpenAI Chat: gpt-4.5-preview-2025-02-27
+OpenAI Chat: gpt-4.5-preview (aliases: gpt-4.5)
 OpenAI Chat: o1
 OpenAI Chat: o1-2024-12-17
 OpenAI Chat: o1-preview
@@ -122,6 +124,8 @@ Let's say OpenAI have just released the `gpt-3.5-turbo-0613` model and you want 
 The `model_id` is the identifier that will be recorded in the LLM logs. You can use this to specify the model, or you can optionally include a list of aliases for that model.
 
 If the model is a completion model (such as `gpt-3.5-turbo-instruct`) add `completion: true` to the configuration.
+
+For reasoning models like `o1` or `o3-mini` add `reasoning: true`.
 
 With this configuration in place, the following command should run a prompt against the new model:
 

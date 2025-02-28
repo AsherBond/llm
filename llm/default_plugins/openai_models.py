@@ -13,14 +13,7 @@ import httpx
 import openai
 import os
 
-try:
-    # Pydantic 2
-    from pydantic import field_validator, Field  # type: ignore
-
-except ImportError:
-    # Pydantic 1
-    from pydantic.fields import Field
-    from pydantic.class_validators import validator as field_validator  # type: ignore [no-redef]
+from pydantic import field_validator, Field
 
 from typing import AsyncGenerator, List, Iterable, Iterator, Optional, Union
 import json
@@ -31,7 +24,9 @@ import yaml
 def register_models(register):
     # GPT-4o
     register(
-        Chat("gpt-4o", vision=True), AsyncChat("gpt-4o", vision=True), aliases=("4o",)
+        Chat("gpt-4o", vision=True, supports_schema=True),
+        AsyncChat("gpt-4o", vision=True, supports_schema=True),
+        aliases=("4o",),
     )
     register(
         Chat("chatgpt-4o-latest", vision=True),
@@ -39,8 +34,8 @@ def register_models(register):
         aliases=("chatgpt-4o",),
     )
     register(
-        Chat("gpt-4o-mini", vision=True),
-        AsyncChat("gpt-4o-mini", vision=True),
+        Chat("gpt-4o-mini", vision=True, supports_schema=True),
+        AsyncChat("gpt-4o-mini", vision=True, supports_schema=True),
         aliases=("4o-mini",),
     )
     for audio_model_id in (
@@ -74,11 +69,33 @@ def register_models(register):
         AsyncChat("gpt-4-turbo"),
         aliases=("gpt-4-turbo-preview", "4-turbo", "4t"),
     )
+    # GPT-4.5
+    register(
+        Chat("gpt-4.5-preview-2025-02-27", vision=True, supports_schema=True),
+        AsyncChat("gpt-4.5-preview-2025-02-27", vision=True, supports_schema=True),
+    )
+    register(
+        Chat("gpt-4.5-preview", vision=True, supports_schema=True),
+        AsyncChat("gpt-4.5-preview", vision=True, supports_schema=True),
+        aliases=("gpt-4.5",),
+    )
     # o1
     for model_id in ("o1", "o1-2024-12-17"):
         register(
-            Chat(model_id, vision=True, can_stream=False, reasoning=True),
-            AsyncChat(model_id, vision=True, can_stream=False, reasoning=True),
+            Chat(
+                model_id,
+                vision=True,
+                can_stream=False,
+                reasoning=True,
+                supports_schema=True,
+            ),
+            AsyncChat(
+                model_id,
+                vision=True,
+                can_stream=False,
+                reasoning=True,
+                supports_schema=True,
+            ),
         )
 
     register(
@@ -90,8 +107,8 @@ def register_models(register):
         AsyncChat("o1-mini", allows_system_prompt=False),
     )
     register(
-        Chat("o3-mini", reasoning=True),
-        AsyncChat("o3-mini", reasoning=True),
+        Chat("o3-mini", reasoning=True, supports_schema=True),
+        AsyncChat("o3-mini", reasoning=True, supports_schema=True),
     )
     # The -instruct completion model
     register(
@@ -114,6 +131,7 @@ def register_models(register):
         api_version = extra_model.get("api_version")
         api_engine = extra_model.get("api_engine")
         headers = extra_model.get("headers")
+        reasoning = extra_model.get("reasoning")
         kwargs = {}
         if extra_model.get("can_stream") is False:
             kwargs["can_stream"] = False
@@ -129,6 +147,7 @@ def register_models(register):
             api_version=api_version,
             api_engine=api_engine,
             headers=headers,
+            reasoning=reasoning,
             **kwargs,
         )
         if api_base:
@@ -387,10 +406,12 @@ class _Shared:
         vision=False,
         audio=False,
         reasoning=False,
+        supports_schema=False,
         allows_system_prompt=True,
     ):
         self.model_id = model_id
         self.key = key
+        self.supports_schema = supports_schema
         self.model_name = model_name
         self.api_base = api_base
         self.api_type = api_type
@@ -459,7 +480,7 @@ class _Shared:
         if prompt.system and prompt.system != current_system:
             messages.append({"role": "system", "content": prompt.system})
         if not prompt.attachments:
-            messages.append({"role": "user", "content": prompt.prompt})
+            messages.append({"role": "user", "content": prompt.prompt or ""})
         else:
             attachment_message = []
             if prompt.prompt:
@@ -511,6 +532,11 @@ class _Shared:
             kwargs["max_tokens"] = self.default_max_tokens
         if json_object:
             kwargs["response_format"] = {"type": "json_object"}
+        if prompt.schema:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "output", "schema": prompt.schema},
+            }
         if stream:
             kwargs["stream_options"] = {"include_usage": True}
         return kwargs

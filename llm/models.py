@@ -20,10 +20,15 @@ from typing import (
     Set,
     Union,
 )
-from .utils import mimetype_from_path, mimetype_from_string, token_usage_string
+from .utils import (
+    mimetype_from_path,
+    mimetype_from_string,
+    token_usage_string,
+    make_schema_id,
+)
 from abc import ABC, abstractmethod
 import json
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from ulid import ULID
 
 CONVERSATION_NAME_LENGTH = 32
@@ -98,11 +103,12 @@ class Attachment:
 
 @dataclass
 class Prompt:
-    prompt: str
+    prompt: Optional[str]
     model: "Model"
     attachments: Optional[List[Attachment]]
     system: Optional[str]
     prompt_json: Optional[str]
+    schema: Optional[Union[Dict, type[BaseModel]]]
     options: "Options"
 
     def __init__(
@@ -114,12 +120,16 @@ class Prompt:
         system=None,
         prompt_json=None,
         options=None,
+        schema=None,
     ):
         self.prompt = prompt
         self.model = model
         self.attachments = list(attachments or [])
         self.system = system
         self.prompt_json = prompt_json
+        if schema and not isinstance(schema, dict) and issubclass(schema, BaseModel):
+            schema = schema.model_json_schema()
+        self.schema = schema
         self.options = options or {}
 
 
@@ -140,10 +150,11 @@ class _BaseConversation:
 class Conversation(_BaseConversation):
     def prompt(
         self,
-        prompt: Optional[str],
+        prompt: Optional[str] = None,
         *,
         attachments: Optional[List[Attachment]] = None,
         system: Optional[str] = None,
+        schema: Optional[Union[dict, type[BaseModel]]] = None,
         stream: bool = True,
         key: Optional[str] = None,
         **options,
@@ -154,6 +165,7 @@ class Conversation(_BaseConversation):
                 model=self.model,
                 attachments=attachments,
                 system=system,
+                schema=schema,
                 options=self.model.Options(**options),
             ),
             self.model,
@@ -182,10 +194,11 @@ class Conversation(_BaseConversation):
 class AsyncConversation(_BaseConversation):
     def prompt(
         self,
-        prompt: Optional[str],
+        prompt: Optional[str] = None,
         *,
         attachments: Optional[List[Attachment]] = None,
         system: Optional[str] = None,
+        schema: Optional[Union[dict, type[BaseModel]]] = None,
         stream: bool = True,
         key: Optional[str] = None,
         **options,
@@ -196,6 +209,7 @@ class AsyncConversation(_BaseConversation):
                 model=self.model,
                 attachments=attachments,
                 system=system,
+                schema=schema,
                 options=self.model.Options(**options),
             ),
             self.model,
@@ -254,6 +268,9 @@ class _BaseResponse:
         self.token_details: Optional[dict] = None
         self.done_callbacks: List[Callable] = []
 
+        if self.prompt.schema and not self.model.supports_schema:
+            raise ValueError(f"{self.model} does not support schemas")
+
     def set_usage(
         self,
         *,
@@ -274,6 +291,11 @@ class _BaseResponse:
         else:
             model = get_model(row["model"])
 
+        # Schema
+        schema = None
+        if row["schema_id"]:
+            schema = json.loads(db["schemas"].get(row["schema_id"])["content"])
+
         response = cls(
             model=model,
             prompt=Prompt(
@@ -281,6 +303,7 @@ class _BaseResponse:
                 model=model,
                 attachments=[],
                 system=row["system"],
+                schema=schema,
                 options=model.Options(**json.loads(row["options_json"])),
             ),
             stream=False,
@@ -324,6 +347,11 @@ class _BaseResponse:
             },
             ignore=True,
         )
+        schema_id = None
+        if self.prompt.schema:
+            schema_id, schema_json = make_schema_id(self.prompt.schema)
+            db["schemas"].insert({"id": schema_id, "content": schema_json}, ignore=True)
+
         response_id = str(ULID()).lower()
         response = {
             "id": response_id,
@@ -346,6 +374,7 @@ class _BaseResponse:
             "token_details": (
                 json.dumps(self.token_details) if self.token_details else None
             ),
+            "schema_id": schema_id,
         }
         db["responses"].insert(response)
         # Persist any attachments - loop through with index
@@ -499,7 +528,6 @@ class AsyncResponse(_BaseResponse):
             return chunk
 
         if not hasattr(self, "_generator"):
-
             if isinstance(self.model, AsyncModel):
                 self._generator = self.model.execute(
                     self.prompt,
@@ -618,10 +646,7 @@ class AsyncResponse(_BaseResponse):
 
 
 class Options(BaseModel):
-    # Note: using pydantic v1 style Configs,
-    # these are also compatible with pydantic v2
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 _Options = Options
@@ -666,6 +691,8 @@ class _BaseModel(ABC, _get_key_mixin):
     can_stream: bool = False
     attachment_types: Set = set()
 
+    supports_schema = False
+
     class Options(_Options):
         pass
 
@@ -699,11 +726,12 @@ class _Model(_BaseModel):
 
     def prompt(
         self,
-        prompt: str,
+        prompt: Optional[str] = None,
         *,
         attachments: Optional[List[Attachment]] = None,
         system: Optional[str] = None,
         stream: bool = True,
+        schema: Optional[Union[dict, type[BaseModel]]] = None,
         **options,
     ) -> Response:
         key = options.pop("key", None)
@@ -713,6 +741,7 @@ class _Model(_BaseModel):
                 prompt,
                 attachments=attachments,
                 system=system,
+                schema=schema,
                 model=self,
                 options=self.Options(**options),
             ),
@@ -753,10 +782,11 @@ class _AsyncModel(_BaseModel):
 
     def prompt(
         self,
-        prompt: str,
+        prompt: Optional[str] = None,
         *,
         attachments: Optional[List[Attachment]] = None,
         system: Optional[str] = None,
+        schema: Optional[Union[dict, type[BaseModel]]] = None,
         stream: bool = True,
         **options,
     ) -> AsyncResponse:
@@ -767,6 +797,7 @@ class _AsyncModel(_BaseModel):
                 prompt,
                 attachments=attachments,
                 system=system,
+                schema=schema,
                 model=self,
                 options=self.Options(**options),
             ),
