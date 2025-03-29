@@ -5,7 +5,6 @@ from dataclasses import asdict
 import io
 import json
 import os
-import re
 from llm import (
     Attachment,
     AsyncConversation,
@@ -25,6 +24,7 @@ from llm import (
     get_embedding_model_aliases,
     get_embedding_model,
     get_plugins,
+    get_template_loaders,
     get_model,
     get_model_aliases,
     get_models_with_aliases,
@@ -39,17 +39,18 @@ from llm.models import _BaseConversation
 from .migrations import migrate
 from .plugins import pm, load_plugins
 from .utils import (
+    extract_fenced_code_block,
+    find_unused_key,
+    make_schema_id,
     mimetype_from_path,
     mimetype_from_string,
-    token_usage_string,
-    extract_fenced_code_block,
-    make_schema_id,
+    multi_schema,
     output_rows_as_json,
     resolve_schema_input,
-    schema_summary,
-    multi_schema,
     schema_dsl,
-    find_unused_key,
+    schema_summary,
+    token_usage_string,
+    truncate_string,
 )
 import base64
 import httpx
@@ -62,7 +63,7 @@ import sqlite_utils
 from sqlite_utils.utils import rows_from_file, Format
 import sys
 import textwrap
-from typing import cast, Optional, Iterable, Union, Tuple
+from typing import cast, Optional, Iterable, Union, Tuple, Any
 import warnings
 import yaml
 
@@ -180,6 +181,19 @@ def cli():
 @click.option("-s", "--system", help="System prompt to use")
 @click.option("model_id", "-m", "--model", help="Model to use")
 @click.option(
+    "-d",
+    "--database",
+    type=click.Path(readable=True, dir_okay=False),
+    help="Path to log database",
+)
+@click.option(
+    "queries",
+    "-q",
+    "--query",
+    multiple=True,
+    help="Use first model matching these strings",
+)
+@click.option(
     "attachments",
     "-a",
     "--attachment",
@@ -250,6 +264,8 @@ def prompt(
     prompt,
     system,
     model_id,
+    database,
+    queries,
     attachments,
     attachment_types,
     options,
@@ -299,10 +315,22 @@ def prompt(
     if log and no_log:
         raise click.ClickException("--log and --no-log are mutually exclusive")
 
-    log_path = logs_db_path()
+    log_path = pathlib.Path(database) if database else logs_db_path()
     (log_path.parent).mkdir(parents=True, exist_ok=True)
     db = sqlite_utils.Database(log_path)
     migrate(db)
+
+    if queries and not model_id:
+        # Use -q options to find model with shortest model_id
+        matches = []
+        for model_with_aliases in get_models_with_aliases():
+            if all(model_with_aliases.matches(q) for q in queries):
+                matches.append(model_with_aliases.model.model_id)
+        if not matches:
+            raise click.ClickException(
+                "No model found matching queries {}".format(", ".join(queries))
+            )
+        model_id = min(matches, key=len)
 
     if schema_multi:
         schema_input = schema_multi
@@ -376,6 +404,17 @@ def prompt(
             to_save["extract_last"] = True
         if schema:
             to_save["schema_object"] = schema
+        if options:
+            # Need to validate and convert their types first
+            model = get_model(model_id or get_default_model())
+            try:
+                to_save["options"] = dict(
+                    (key, value)
+                    for key, value in model.Options(**dict(options))
+                    if value is not None
+                )
+            except pydantic.ValidationError as ex:
+                raise click.ClickException(render_errors(ex.errors()))
         path.write_text(
             yaml.dump(
                 to_save,
@@ -398,10 +437,21 @@ def prompt(
         if template_obj.schema_object:
             schema = template_obj.schema_object
         input_ = ""
+        if template_obj.options:
+            # Make options mutable (they start as a tuple)
+            options = list(options)
+            # Load any options, provided they were not set using -o already
+            specified_options = dict(options)
+            for option_name, option_value in template_obj.options.items():
+                if option_name not in specified_options:
+                    options.append((option_name, option_value))
         if "input" in template_obj.vars():
             input_ = read_prompt()
         try:
-            prompt, system = template_obj.evaluate(input_, params)
+            template_prompt, system = template_obj.evaluate(input_, params)
+            if template_prompt:
+                # Over-ride user prompt only if the template provided one
+                prompt = template_prompt
         except Template.MissingVariables as ex:
             raise click.ClickException(str(ex))
         if model_id is None and template_obj.model:
@@ -450,6 +500,12 @@ def prompt(
             )
         except pydantic.ValidationError as ex:
             raise click.ClickException(render_errors(ex.errors()))
+
+    # Add on any default model options
+    default_options = get_model_options(model_id)
+    for key_, value in default_options.items():
+        if key_ not in validated_options:
+            validated_options[key_] = value
 
     kwargs = {**validated_options}
 
@@ -932,6 +988,13 @@ order by prompt_attachments."order"
     "--path",
     type=click.Path(readable=True, exists=True, dir_okay=False),
     help="Path to log database",
+    hidden=True,
+)
+@click.option(
+    "-d",
+    "--database",
+    type=click.Path(readable=True, exists=True, dir_okay=False),
+    help="Path to log database",
 )
 @click.option("-m", "--model", help="Filter by model or model alias")
 @click.option("-q", "--query", help="Search for logs matching this string")
@@ -987,6 +1050,7 @@ order by prompt_attachments."order"
 def logs_list(
     count,
     path,
+    database,
     model,
     query,
     schema_input,
@@ -1008,6 +1072,8 @@ def logs_list(
     json_output,
 ):
     "Show recent logged prompts and their responses"
+    if database and not path:
+        path = database
     path = pathlib.Path(path or logs_db_path())
     if not path.exists():
         raise click.ClickException("No log database found at {}".format(path))
@@ -1148,8 +1214,8 @@ def logs_list(
 
     for row in rows:
         if truncate:
-            row["prompt"] = _truncate_string(row["prompt"])
-            row["response"] = _truncate_string(row["response"])
+            row["prompt"] = truncate_string(row["prompt"] or "")
+            row["response"] = truncate_string(row["response"] or "")
         # Either decode or remove all JSON keys
         keys = list(row.keys())
         for key in keys:
@@ -1187,8 +1253,12 @@ def logs_list(
         should_show_conversation = True
         for row in rows:
             if short:
-                system = _truncate_string(row["system"], 120, end=True)
-                prompt = _truncate_string(row["prompt"], 120, end=True)
+                system = truncate_string(
+                    row["system"] or "", 120, normalize_whitespace=True
+                )
+                prompt = truncate_string(
+                    row["prompt"] or "", 120, normalize_whitespace=True, keep_end=True
+                )
                 cid = row["conversation_id"]
                 attachments = attachments_by_id.get(row["id"])
                 obj = {
@@ -1446,6 +1516,54 @@ def templates_list():
             click.echo(display_truncated(text))
 
 
+@templates.command(name="show")
+@click.argument("name")
+def templates_show(name):
+    "Show the specified prompt template"
+    template = load_template(name)
+    click.echo(
+        yaml.dump(
+            dict((k, v) for k, v in template.model_dump().items() if v is not None),
+            indent=4,
+            default_flow_style=False,
+        )
+    )
+
+
+@templates.command(name="edit")
+@click.argument("name")
+def templates_edit(name):
+    "Edit the specified prompt template using the default $EDITOR"
+    # First ensure it exists
+    path = template_dir() / f"{name}.yaml"
+    if not path.exists():
+        path.write_text(DEFAULT_TEMPLATE, "utf-8")
+    click.edit(filename=path)
+    # Validate that template
+    load_template(name)
+
+
+@templates.command(name="path")
+def templates_path():
+    "Output the path to the templates directory"
+    click.echo(template_dir())
+
+
+@templates.command(name="loaders")
+def templates_loaders():
+    "Show template loaders registered by plugins"
+    found = False
+    for prefix, loader in get_template_loaders().items():
+        found = True
+        docs = "Undocumented"
+        if loader.__doc__:
+            docs = textwrap.dedent(loader.__doc__).strip()
+        click.echo(f"{prefix}:")
+        click.echo(textwrap.indent(docs, "  "))
+    if not found:
+        click.echo("No template loaders found")
+
+
 @cli.group(
     cls=DefaultGroup,
     default="list",
@@ -1461,6 +1579,13 @@ def schemas():
     "--path",
     type=click.Path(readable=True, exists=True, dir_okay=False),
     help="Path to log database",
+    hidden=True,
+)
+@click.option(
+    "-d",
+    "--database",
+    type=click.Path(readable=True, exists=True, dir_okay=False),
+    help="Path to log database",
 )
 @click.option(
     "queries",
@@ -1470,8 +1595,10 @@ def schemas():
     help="Search for schemas matching this string",
 )
 @click.option("--full", is_flag=True, help="Output full schema contents")
-def schemas_list(path, queries, full):
+def schemas_list(path, database, queries, full):
     "List stored schemas"
+    if database and not path:
+        path = database
     path = pathlib.Path(path or logs_db_path())
     if not path.exists():
         raise click.ClickException("No log database found at {}".format(path))
@@ -1532,9 +1659,18 @@ def schemas_list(path, queries, full):
     "--path",
     type=click.Path(readable=True, exists=True, dir_okay=False),
     help="Path to log database",
+    hidden=True,
 )
-def schemas_show(schema_id, path):
+@click.option(
+    "-d",
+    "--database",
+    type=click.Path(readable=True, exists=True, dir_okay=False),
+    help="Path to log database",
+)
+def schemas_show(schema_id, path, database):
     "Show a stored schema"
+    if database and not path:
+        path = database
     path = pathlib.Path(path or logs_db_path())
     if not path.exists():
         raise click.ClickException("No log database found at {}".format(path))
@@ -1682,39 +1818,6 @@ def display_truncated(text):
         return text[: console_width - 3] + "..."
     else:
         return text
-
-
-@templates.command(name="show")
-@click.argument("name")
-def templates_show(name):
-    "Show the specified prompt template"
-    template = load_template(name)
-    click.echo(
-        yaml.dump(
-            dict((k, v) for k, v in template.model_dump().items() if v is not None),
-            indent=4,
-            default_flow_style=False,
-        )
-    )
-
-
-@templates.command(name="edit")
-@click.argument("name")
-def templates_edit(name):
-    "Edit the specified prompt template using the default $EDITOR"
-    # First ensure it exists
-    path = template_dir() / f"{name}.yaml"
-    if not path.exists():
-        path.write_text(DEFAULT_TEMPLATE, "utf-8")
-    click.edit(filename=path)
-    # Validate that template
-    load_template(name)
-
-
-@templates.command(name="path")
-def templates_path():
-    "Output the path to the templates directory"
-    click.echo(template_dir())
 
 
 @cli.command()
@@ -2112,13 +2215,14 @@ def embed_multi(
 @click.option(
     "-n", "--number", type=int, default=10, help="Number of results to return"
 )
+@click.option("-p", "--plain", is_flag=True, help="Output in plain text format")
 @click.option(
     "-d",
     "--database",
     type=click.Path(file_okay=True, allow_dash=False, dir_okay=False, writable=True),
     envvar="LLM_EMBEDDINGS_DB",
 )
-def similar(collection, id, input, content, binary, number, database):
+def similar(collection, id, input, content, binary, number, plain, database):
     """
     Return top N similar IDs from a collection using cosine similarity.
 
@@ -2169,7 +2273,15 @@ def similar(collection, id, input, content, binary, number, database):
         results = collection_obj.similar(content, number)
 
     for result in results:
-        click.echo(json.dumps(asdict(result)))
+        if plain:
+            click.echo(f"{result.id} ({result.score})\n")
+            if result.content:
+                click.echo(textwrap.indent(result.content, "  "))
+            if result.metadata:
+                click.echo(textwrap.indent(json.dumps(result.metadata), "  "))
+            click.echo("")
+        else:
+            click.echo(json.dumps(asdict(result)))
 
 
 @cli.group(
@@ -2309,35 +2421,156 @@ def collections_delete(collection, database):
     collection_obj.delete()
 
 
+@models.group(
+    cls=DefaultGroup,
+    default="list",
+    default_if_no_args=True,
+)
+def options():
+    "Manage default options for models"
+
+
+@options.command(name="list")
+def options_list():
+    """
+    List default options for all models
+
+    Example usage:
+
+    \b
+        llm models options list
+    """
+    options = get_all_model_options()
+    if not options:
+        click.echo("No default options set for any models.", err=True)
+        return
+
+    for model_id, model_options in options.items():
+        click.echo(f"{model_id}:")
+        for key, value in model_options.items():
+            click.echo(f"  {key}: {value}")
+
+
+@options.command(name="show")
+@click.argument("model")
+def options_show(model):
+    """
+    List default options set for a specific model
+
+    Example usage:
+
+    \b
+        llm models options show gpt-4o
+    """
+    import llm
+
+    try:
+        # Resolve alias to model ID
+        model_obj = llm.get_model(model)
+        model_id = model_obj.model_id
+    except llm.UnknownModelError:
+        # Use as-is if not found
+        model_id = model
+
+    options = get_model_options(model_id)
+    if not options:
+        click.echo(f"No default options set for model '{model_id}'.", err=True)
+        return
+
+    for key, value in options.items():
+        click.echo(f"{key}: {value}")
+
+
+@options.command(name="set")
+@click.argument("model")
+@click.argument("key")
+@click.argument("value")
+def options_set(model, key, value):
+    """
+    Set a default option for a model
+
+    Example usage:
+
+    \b
+        llm models options set gpt-4o temperature 0.5
+    """
+    import llm
+
+    try:
+        # Resolve alias to model ID
+        model_obj = llm.get_model(model)
+        model_id = model_obj.model_id
+
+        # Validate option against model schema
+        try:
+            # Create a test Options object to validate
+            test_options = {key: value}
+            model_obj.Options(**test_options)
+        except pydantic.ValidationError as ex:
+            raise click.ClickException(render_errors(ex.errors()))
+
+    except llm.UnknownModelError:
+        # Use as-is if not found
+        model_id = model
+
+    set_model_option(model_id, key, value)
+    click.echo(f"Set default option {key}={value} for model {model_id}", err=True)
+
+
+@options.command(name="clear")
+@click.argument("model")
+@click.argument("key", required=False)
+def options_clear(model, key):
+    """
+    Clear default option(s) for a model
+
+    Example usage:
+
+    \b
+        llm models options clear gpt-4o
+        # Or for a single option
+        llm models options clear gpt-4o temperature
+    """
+    import llm
+
+    try:
+        # Resolve alias to model ID
+        model_obj = llm.get_model(model)
+        model_id = model_obj.model_id
+    except llm.UnknownModelError:
+        # Use as-is if not found
+        model_id = model
+
+    cleared_keys = []
+    if not key:
+        cleared_keys = list(get_model_options(model_id).keys())
+        for key_ in cleared_keys:
+            clear_model_option(model_id, key_)
+    else:
+        cleared_keys.append(key)
+        clear_model_option(model_id, key)
+    if cleared_keys:
+        if len(cleared_keys) == 1:
+            click.echo(f"Cleared option '{cleared_keys[0]}' for model {model_id}")
+        else:
+            click.echo(
+                f"Cleared {', '.join(cleared_keys)} options for model {model_id}"
+            )
+
+
 def template_dir():
     path = user_dir() / "templates"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def _truncate_string(s, max_length=100, end=False):
-    if not s:
-        return s
-    if end:
-        s = re.sub(r"\s+", " ", s)
-        if len(s) <= max_length:
-            return s
-        return s[: max_length - 3] + "..."
-    if len(s) <= max_length:
-        return s
-    return s[: max_length - 3] + "..."
-
-
 def logs_db_path():
     return user_dir() / "logs.db"
 
 
-def load_template(name):
-    path = template_dir() / f"{name}.yaml"
-    if not path.exists():
-        raise click.ClickException(f"Invalid template: {name}")
+def _parse_yaml_template(name, content):
     try:
-        loaded = yaml.safe_load(path.read_text())
+        loaded = yaml.safe_load(content)
     except yaml.YAMLError as ex:
         raise click.ClickException("Invalid YAML: {}".format(str(ex)))
     if isinstance(loaded, str):
@@ -2349,6 +2582,32 @@ def load_template(name):
         msg = "A validation error occurred:\n"
         msg += render_errors(ex.errors())
         raise click.ClickException(msg)
+
+
+def load_template(name):
+    if name.startswith("https://") or name.startswith("http://"):
+        response = httpx.get(name)
+        response.raise_for_status()
+        return _parse_yaml_template(name, response.text)
+
+    if ":" in name:
+        prefix, rest = name.split(":", 1)
+        loaders = get_template_loaders()
+        if prefix not in loaders:
+            raise click.ClickException("Unknown template prefix: {}".format(prefix))
+        loader = loaders[prefix]
+        try:
+            return loader(rest)
+        except Exception as ex:
+            raise click.ClickException(
+                "Could not load template {}: {}".format(name, ex)
+            )
+
+    path = template_dir() / f"{name}.yaml"
+    if not path.exists():
+        raise click.ClickException(f"Invalid template: {name}")
+    content = path.read_text()
+    return _parse_yaml_template(name, content)
 
 
 def get_history(chat_id):
@@ -2399,3 +2658,98 @@ def _human_readable_size(size_bytes):
 
 def logs_on():
     return not (user_dir() / "logs-off").exists()
+
+
+def get_all_model_options() -> dict:
+    """
+    Get all default options for all models
+    """
+    path = user_dir() / "model_options.json"
+    if not path.exists():
+        return {}
+
+    try:
+        options = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {}
+
+    return options
+
+
+def get_model_options(model_id: str) -> dict:
+    """
+    Get default options for a specific model
+
+    Args:
+        model_id: Return options for model with this ID
+
+    Returns:
+        A dictionary of model options
+    """
+    path = user_dir() / "model_options.json"
+    if not path.exists():
+        return {}
+
+    try:
+        options = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {}
+
+    return options.get(model_id, {})
+
+
+def set_model_option(model_id: str, key: str, value: Any) -> None:
+    """
+    Set a default option for a model.
+
+    Args:
+        model_id: The model ID
+        key: The option key
+        value: The option value
+    """
+    path = user_dir() / "model_options.json"
+    if path.exists():
+        try:
+            options = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            options = {}
+    else:
+        options = {}
+
+    # Ensure the model has an entry
+    if model_id not in options:
+        options[model_id] = {}
+
+    # Set the option
+    options[model_id][key] = value
+
+    # Save the options
+    path.write_text(json.dumps(options, indent=2))
+
+
+def clear_model_option(model_id: str, key: str) -> None:
+    """
+    Clear a model option
+
+    Args:
+        model_id: The model ID
+        key: Key to clear
+    """
+    path = user_dir() / "model_options.json"
+    if not path.exists():
+        return
+
+    try:
+        options = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return
+
+    if model_id not in options:
+        return
+
+    if key in options[model_id]:
+        del options[model_id][key]
+        if not options[model_id]:
+            del options[model_id]
+
+    path.write_text(json.dumps(options, indent=2))

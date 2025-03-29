@@ -60,11 +60,18 @@ OpenAI Completion: gpt-3.5-turbo-instruct (aliases: 3.5-instruct, chatgpt-instru
 
 See [the OpenAI models documentation](https://platform.openai.com/docs/models) for details of each of these.
 
-`gpt-4o-mini` (aliased to `4o-mini`) is the least expensive model, and is the default for if you don't specify a model at all. `gpt-4o` (aliased to `4o`) is the newest, cheapest and fastest of the GPT-4 family of models.
+`gpt-4o-mini` (aliased to `4o-mini`) is the least expensive model, and is the default for if you don't specify a model at all. Consult [OpenAI's model documentation](https://platform.openai.com/docs/models) for details of the other models.
 
-The `gpt-3.5-turbo-instruct` model is a little different - it is a completion model rather than a chat model, described in [the OpenAI completions documentation](https://platform.openai.com/docs/api-reference/completions/create).
+[o1-pro](https://platform.openai.com/docs/models/o1-pro) is not available  through the Chat Completions API used by LLM's default OpenAI plugin. You can install the new [llm-openai-plugin](https://github.com/simonw/llm-openai-plugin) plugin to access that model.
 
-Completion models can be called with the `-o logprobs 3` option (not supported by chat models) which will cause LLM to store 3 log probabilities for each returned token in the SQLite database. Consult [this issue](https://github.com/simonw/llm/issues/284#issuecomment-1724772704) for details on how to read these values.
+## Model features
+
+The following features work with OpenAI models:
+
+- {ref}`System prompts <usage-system-prompts>` can be used to provide instructions that have a higher weight than the prompt itself.
+- {ref}`Attachments <usage-attachments>`. Many OpenAI models support image inputs - check which ones using `llm models --options`. Any model that accepts images can also accept PDFs.
+- {ref}`Schemas <usage-schemas>` can be used to influence the JSON structure of the model output.
+- {ref}`Model options <usage-model-options>` can be used to set parameters like `temperature`. Use `llm models --options` for a full list of supported options.
 
 (openai-models-embedding)=
 
@@ -97,6 +104,14 @@ The vector size of the supported OpenAI embedding models are as follows:
 | 3-small-512 | 512 |
 | 3-large-256 | 256 |
 | 3-large-1024 | 1024 |
+
+(openai-completion-models)=
+
+## OpenAI completion models
+
+The `gpt-3.5-turbo-instruct` model is a little different - it is a completion model rather than a chat model, described in [the OpenAI completions documentation](https://platform.openai.com/docs/api-reference/completions/create).
+
+Completion models can be called with the `-o logprobs 3` option (not supported by chat models) which will cause LLM to store 3 log probabilities for each returned token in the SQLite database. Consult [this issue](https://github.com/simonw/llm/issues/284#issuecomment-1724772704) for details on how to read these values.
 
 (openai-extra-models)=
 

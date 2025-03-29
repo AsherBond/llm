@@ -135,6 +135,12 @@ def register_models(register):
         kwargs = {}
         if extra_model.get("can_stream") is False:
             kwargs["can_stream"] = False
+        if extra_model.get("supports_schema") is True:
+            kwargs["supports_schema"] = True
+        if extra_model.get("vision") is True:
+            kwargs["vision"] = True
+        if extra_model.get("audio") is True:
+            kwargs["audio"] = True
         if extra_model.get("completion"):
             klass = Completion
         else:
@@ -378,6 +384,16 @@ def _attachment(attachment):
     if not url or attachment.resolve_type().startswith("audio/"):
         base64_content = attachment.base64_content()
         url = f"data:{attachment.resolve_type()};base64,{base64_content}"
+    if attachment.resolve_type() == "application/pdf":
+        if not base64_content:
+            base64_content = attachment.base64_content()
+        return {
+            "type": "file",
+            "file": {
+                "filename": f"{attachment.id()}.pdf",
+                "file_data": f"data:application/pdf;base64,{base64_content}",
+            },
+        }
     if attachment.resolve_type().startswith("image/"):
         return {"type": "image_url", "image_url": {"url": url}}
     else:
@@ -434,6 +450,7 @@ class _Shared:
                     "image/jpeg",
                     "image/webp",
                     "image/gif",
+                    "application/pdf",
                 }
             )
 
