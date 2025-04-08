@@ -14,6 +14,19 @@ MIME_TYPE_FIXES = {
 }
 
 
+class Fragment(str):
+    def __new__(cls, content, *args, **kwargs):
+        # For immutable classes like str, __new__ creates the string object
+        return super().__new__(cls, content)
+
+    def __init__(self, content, source=""):
+        # Initialize our custom attributes
+        self.source = source
+
+    def id(self):
+        return hashlib.sha256(self.encode("utf-8")).hexdigest()
+
+
 def mimetype_from_string(content) -> Optional[str]:
     try:
         type_ = puremagic.from_string(content, mime=True)
@@ -240,8 +253,13 @@ def resolve_schema_input(db, schema_input, load_template):
         return
     if schema_input.strip().startswith("t:"):
         name = schema_input.strip()[2:]
-        template = load_template(name)
-        if not template.schema_object:
+        schema_object = None
+        try:
+            template = load_template(name)
+            schema_object = template.schema_object
+        except ValueError:
+            raise click.ClickException("Invalid template: {}".format(name))
+        if not schema_object:
             raise click.ClickException("Template '{}' has no schema".format(name))
         return template.schema_object
     if schema_input.strip().startswith("{"):
@@ -431,3 +449,57 @@ def truncate_string(
     else:
         # Fall back to simple truncation for very small max_length
         return text[: max_length - 3] + "..."
+
+
+def ensure_fragment(db, content):
+    sql = """
+    insert into fragments (hash, content, datetime_utc, source)
+    values (:hash, :content, datetime('now'), :source)
+    on conflict(hash) do nothing
+    """
+    hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    source = None
+    if isinstance(content, Fragment):
+        source = content.source
+    with db.conn:
+        db.execute(sql, {"hash": hash, "content": content, "source": source})
+        return list(
+            db.query("select id from fragments where hash = :hash", {"hash": hash})
+        )[0]["id"]
+
+
+def maybe_fenced_code(content: str) -> str:
+    "Return the content as a fenced code block if it looks like code"
+    is_code = False
+    if content.count("<") > 10:
+        is_code = True
+    if not is_code:
+        # Are 90% of the lines under 120 chars?
+        lines = content.splitlines()
+        if len(lines) > 3:
+            num_short = sum(1 for line in lines if len(line) < 120)
+            if num_short / len(lines) > 0.9:
+                is_code = True
+    if is_code:
+        # Find number of backticks not already present
+        num_backticks = 3
+        while "`" * num_backticks in content:
+            num_backticks += 1
+        # Add backticks
+        content = (
+            "\n"
+            + "`" * num_backticks
+            + "\n"
+            + content.strip()
+            + "\n"
+            + "`" * num_backticks
+        )
+    return content
+
+
+_plugin_prefix_re = re.compile(r"^[a-zA-Z0-9_-]+:")
+
+
+def has_plugin_prefix(value: str) -> bool:
+    "Check if value starts with alphanumeric prefix followed by a colon"
+    return bool(_plugin_prefix_re.match(value))

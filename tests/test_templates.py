@@ -4,6 +4,7 @@ from llm import Template
 from llm.cli import cli
 import os
 from unittest import mock
+import pathlib
 import pytest
 import yaml
 
@@ -63,6 +64,7 @@ def test_templates_list(templates_path, args):
         "system: summarize this\nprompt: $input", "utf-8"
     )
     (templates_path / "sys.yaml").write_text("system: Summarize this", "utf-8")
+    (templates_path / "invalid.yaml").write_text("system2: This is invalid", "utf-8")
     runner = CliRunner()
     result = runner.invoke(cli, args)
     assert result.exit_code == 0
@@ -77,7 +79,7 @@ def test_templates_list(templates_path, args):
 
 
 @pytest.mark.parametrize(
-    "args,expected_prompt,expected_error",
+    "args,expected,expected_error",
     (
         (["-m", "gpt4", "hello"], {"model": "gpt-4", "prompt": "hello"}, None),
         (["hello $foo"], {"prompt": "hello $foo"}, None),
@@ -116,18 +118,45 @@ def test_templates_list(templates_path, args):
             },
             None,
         ),
+        # And fragments and system_fragments
+        (
+            ["--fragment", "f1.txt", "--system-fragment", "https://example.com/f2.txt"],
+            {
+                "fragments": ["f1.txt"],
+                "system_fragments": ["https://example.com/f2.txt"],
+            },
+            None,
+        ),
+        # And attachments and attachment_types
+        (
+            ["--attachment", "a.txt", "--attachment-type", "b.txt", "text/plain"],
+            {
+                "attachments": ["a.txt"],
+                "attachment_types": [{"type": "text/plain", "value": "b.txt"}],
+            },
+            None,
+        ),
     ),
 )
-def test_templates_prompt_save(templates_path, args, expected_prompt, expected_error):
+def test_templates_prompt_save(templates_path, args, expected, expected_error):
     assert not (templates_path / "saved.yaml").exists()
     runner = CliRunner()
-    result = runner.invoke(cli, args + ["--save", "saved"], catch_exceptions=False)
+    with runner.isolated_filesystem():
+        # Create a file to test attachment
+        pathlib.Path("a.txt").write_text("attachment", "utf-8")
+        pathlib.Path("b.txt").write_text("attachment type", "utf-8")
+        result = runner.invoke(cli, args + ["--save", "saved"], catch_exceptions=False)
     if not expected_error:
         assert result.exit_code == 0
-        assert (
-            yaml.safe_load((templates_path / "saved.yaml").read_text("utf-8"))
-            == expected_prompt
-        )
+        yaml_data = yaml.safe_load((templates_path / "saved.yaml").read_text("utf-8"))
+        # Adjust attachment and attachment_types paths to be just the filename
+        if "attachments" in yaml_data:
+            yaml_data["attachments"] = [
+                os.path.basename(path) for path in yaml_data["attachments"]
+            ]
+        for item in yaml_data.get("attachment_types", []):
+            item["value"] = os.path.basename(item["value"])
+        assert yaml_data == expected
     else:
         assert result.exit_code == 1
         assert expected_error in result.output
@@ -201,12 +230,13 @@ def test_templates_error_on_missing_schema(templates_path):
             None,
             marks=pytest.mark.httpx_mock(),
         ),
+        # Template generated prompt should combine with CLI prompt
         (
             "prompt: 'Say $hello'",
             "Input text",
             ["-p", "hello", "Blah"],
             "gpt-4o-mini",
-            "Say Blah",
+            "Say Blah\nInput text",
             None,
             None,
         ),
@@ -326,3 +356,17 @@ def test_execute_prompt_from_template_url(httpx_mock, template, expected):
     )
     assert result.exit_code == 0
     assert result.output.strip() == expected.strip()
+
+
+def test_execute_prompt_from_template_path():
+    runner = CliRunner()
+    with runner.isolated_filesystem() as temp_dir:
+        path = pathlib.Path(temp_dir) / "my-template.yaml"
+        path.write_text("system: system\nprompt: prompt", "utf-8")
+        result = runner.invoke(
+            cli,
+            ["-t", str(path), "-m", "echo"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        assert result.output.strip() == "system:\nsystem\n\nprompt:\nprompt"

@@ -3,17 +3,25 @@ import string
 from typing import Optional, Any, Dict, List, Tuple
 
 
+class AttachmentType(BaseModel):
+    type: str
+    value: str
+
+
 class Template(BaseModel):
     name: str
     prompt: Optional[str] = None
     system: Optional[str] = None
+    attachments: Optional[List[str]] = None
+    attachment_types: Optional[List[AttachmentType]] = None
     model: Optional[str] = None
     defaults: Optional[Dict[str, Any]] = None
     options: Optional[Dict[str, Any]] = None
-    # Should a fenced code block be extracted?
-    extract: Optional[bool] = None
+    extract: Optional[bool] = None  # For extracting fenced code blocks
     extract_last: Optional[bool] = None
     schema_object: Optional[dict] = None
+    fragments: Optional[List[str]] = None
+    system_fragments: Optional[List[str]] = None
 
     model_config = ConfigDict(extra="forbid")
 

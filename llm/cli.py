@@ -12,6 +12,7 @@ from llm import (
     AsyncResponse,
     Collection,
     Conversation,
+    Fragment,
     Response,
     Template,
     UnknownModelError,
@@ -24,6 +25,7 @@ from llm import (
     get_embedding_model_aliases,
     get_embedding_model,
     get_plugins,
+    get_fragment_loaders,
     get_template_loaders,
     get_model,
     get_model_aliases,
@@ -39,9 +41,12 @@ from llm.models import _BaseConversation
 from .migrations import migrate
 from .plugins import pm, load_plugins
 from .utils import (
+    ensure_fragment,
     extract_fenced_code_block,
     find_unused_key,
+    has_plugin_prefix,
     make_schema_id,
+    maybe_fenced_code,
     mimetype_from_path,
     mimetype_from_string,
     multi_schema,
@@ -56,6 +61,7 @@ import base64
 import httpx
 import pathlib
 import pydantic
+import re
 import readline
 from runpy import run_module
 import shutil
@@ -63,7 +69,7 @@ import sqlite_utils
 from sqlite_utils.utils import rows_from_file, Format
 import sys
 import textwrap
-from typing import cast, Optional, Iterable, Union, Tuple, Any
+from typing import cast, Optional, Iterable, List, Union, Tuple, Any
 import warnings
 import yaml
 
@@ -72,54 +78,157 @@ warnings.simplefilter("ignore", ResourceWarning)
 DEFAULT_TEMPLATE = "prompt: "
 
 
+class FragmentNotFound(Exception):
+    pass
+
+
+def validate_fragment_alias(ctx, param, value):
+    if not re.match(r"^[a-zA-Z0-9_-]+$", value):
+        raise click.BadParameter("Fragment alias must be alphanumeric")
+    return value
+
+
+def resolve_fragments(
+    db: sqlite_utils.Database, fragments: Iterable[str]
+) -> List[Fragment]:
+    """
+    Resolve fragments into a list of (content, source) tuples
+    """
+
+    def _load_by_alias(fragment):
+        rows = list(
+            db.query(
+                """
+                select content, source from fragments
+                left join fragment_aliases on fragments.id = fragment_aliases.fragment_id
+                where alias = :alias or hash = :alias limit 1
+                """,
+                {"alias": fragment},
+            )
+        )
+        if rows:
+            row = rows[0]
+            return row["content"], row["source"]
+        return None, None
+
+    # These can be URLs or paths or plugin references
+    resolved = []
+    for fragment in fragments:
+        if fragment.startswith("http://") or fragment.startswith("https://"):
+            client = httpx.Client(follow_redirects=True, max_redirects=3)
+            response = client.get(fragment)
+            response.raise_for_status()
+            resolved.append(Fragment(response.text, fragment))
+        elif fragment == "-":
+            resolved.append(Fragment(sys.stdin.read(), "-"))
+        elif has_plugin_prefix(fragment):
+            prefix, rest = fragment.split(":", 1)
+            loaders = get_fragment_loaders()
+            if prefix not in loaders:
+                raise FragmentNotFound("Unknown fragment prefix: {}".format(prefix))
+            loader = loaders[prefix]
+            try:
+                result = loader(rest)
+                if not isinstance(result, list):
+                    result = [result]
+                resolved.extend(result)
+            except Exception as ex:
+                raise FragmentNotFound(
+                    "Could not load fragment {}: {}".format(fragment, ex)
+                )
+        else:
+            # Try from the DB
+            content, source = _load_by_alias(fragment)
+            if content is not None:
+                resolved.append(Fragment(content, source))
+            else:
+                # Now try path
+                path = pathlib.Path(fragment)
+                if path.exists():
+                    resolved.append(Fragment(path.read_text(), str(path.resolve())))
+                else:
+                    raise FragmentNotFound(f"Fragment '{fragment}' not found")
+    return resolved
+
+
+class AttachmentError(Exception):
+    """Exception raised for errors in attachment resolution."""
+
+    pass
+
+
+def resolve_attachment(value):
+    """
+    Resolve an attachment from a string value which could be:
+    - "-" for stdin
+    - A URL
+    - A file path
+
+    Returns an Attachment object.
+    Raises AttachmentError if the attachment cannot be resolved.
+    """
+    if value == "-":
+        content = sys.stdin.buffer.read()
+        # Try to guess type
+        mimetype = mimetype_from_string(content)
+        if mimetype is None:
+            raise AttachmentError("Could not determine mimetype of stdin")
+        return Attachment(type=mimetype, path=None, url=None, content=content)
+
+    if "://" in value:
+        # Confirm URL exists and try to guess type
+        try:
+            response = httpx.head(value)
+            response.raise_for_status()
+            mimetype = response.headers.get("content-type")
+        except httpx.HTTPError as ex:
+            raise AttachmentError(str(ex))
+        return Attachment(type=mimetype, path=None, url=value, content=None)
+
+    # Check that the file exists
+    path = pathlib.Path(value)
+    if not path.exists():
+        raise AttachmentError(f"File {value} does not exist")
+    path = path.resolve()
+
+    # Try to guess type
+    mimetype = mimetype_from_path(str(path))
+    if mimetype is None:
+        raise AttachmentError(f"Could not determine mimetype of {value}")
+
+    return Attachment(type=mimetype, path=str(path), url=None, content=None)
+
+
 class AttachmentType(click.ParamType):
     name = "attachment"
 
     def convert(self, value, param, ctx):
-        if value == "-":
-            content = sys.stdin.buffer.read()
-            # Try to guess type
-            mimetype = mimetype_from_string(content)
-            if mimetype is None:
-                raise click.BadParameter("Could not determine mimetype of stdin")
-            return Attachment(type=mimetype, path=None, url=None, content=content)
-        if "://" in value:
-            # Confirm URL exists and try to guess type
-            try:
-                response = httpx.head(value)
-                response.raise_for_status()
-                mimetype = response.headers.get("content-type")
-            except httpx.HTTPError as ex:
-                raise click.BadParameter(str(ex))
-            return Attachment(mimetype, None, value, None)
-        # Check that the file exists
+        try:
+            return resolve_attachment(value)
+        except AttachmentError as e:
+            self.fail(str(e), param, ctx)
+
+
+def resolve_attachment_with_type(value: str, mimetype: str) -> Attachment:
+    if "://" in value:
+        attachment = Attachment(mimetype, None, value, None)
+    elif value == "-":
+        content = sys.stdin.buffer.read()
+        attachment = Attachment(mimetype, None, None, content)
+    else:
+        # Look for file
         path = pathlib.Path(value)
         if not path.exists():
-            self.fail(f"File {value} does not exist", param, ctx)
+            raise click.BadParameter(f"File {value} does not exist")
         path = path.resolve()
-        # Try to guess type
-        mimetype = mimetype_from_path(str(path))
-        if mimetype is None:
-            raise click.BadParameter(f"Could not determine mimetype of {value}")
-        return Attachment(type=mimetype, path=str(path), url=None, content=None)
+        attachment = Attachment(mimetype, str(path), None, None)
+    return attachment
 
 
-def attachment_types_callback(ctx, param, values):
+def attachment_types_callback(ctx, param, values) -> List[Attachment]:
     collected = []
     for value, mimetype in values:
-        if "://" in value:
-            attachment = Attachment(mimetype, None, value, None)
-        elif value == "-":
-            content = sys.stdin.buffer.read()
-            attachment = Attachment(mimetype, None, None, content)
-        else:
-            # Look for file
-            path = pathlib.Path(value)
-            if not path.exists():
-                raise click.BadParameter(f"File {value} does not exist")
-            path = path.resolve()
-            attachment = Attachment(mimetype, str(path), None, None)
-        collected.append(attachment)
+        collected.append(resolve_attachment_with_type(value, mimetype))
     return collected
 
 
@@ -173,6 +282,10 @@ def cli():
     Then execute a prompt like this:
 
         llm 'Five outrageous names for a pet pelican'
+
+    For a full list of prompting options run:
+
+        llm prompt --help
     """
 
 
@@ -208,7 +321,7 @@ def cli():
     type=(str, str),
     multiple=True,
     callback=attachment_types_callback,
-    help="Attachment with explicit mimetype",
+    help="\b\nAttachment with explicit mimetype,\n--at image.jpg image/jpeg",
 )
 @click.option(
     "options",
@@ -222,6 +335,20 @@ def cli():
 @click.option(
     "--schema-multi",
     help="JSON schema to use for multiple results",
+)
+@click.option(
+    "fragments",
+    "-f",
+    "--fragment",
+    multiple=True,
+    help="Fragment (alias, URL, hash or file path) to add to the prompt",
+)
+@click.option(
+    "system_fragments",
+    "--sf",
+    "--system-fragment",
+    multiple=True,
+    help="Fragment to add to system prompt",
 )
 @click.option("-t", "--template", help="Template to use")
 @click.option(
@@ -271,6 +398,8 @@ def prompt(
     options,
     schema_input,
     schema_multi,
+    fragments,
+    system_fragments,
     template,
     param,
     no_stream,
@@ -364,6 +493,7 @@ def prompt(
             and not attachments
             and not attachment_types
             and not schema
+            and not fragments
         ):
             # Hang waiting for input to stdin (unless --save)
             prompt = sys.stdin.read()
@@ -404,6 +534,21 @@ def prompt(
             to_save["extract_last"] = True
         if schema:
             to_save["schema_object"] = schema
+        if fragments:
+            to_save["fragments"] = list(fragments)
+        if system_fragments:
+            to_save["system_fragments"] = list(system_fragments)
+        if attachments:
+            # Only works for attachments with a path or url
+            to_save["attachments"] = [
+                (a.path or a.url) for a in attachments if (a.path or a.url)
+            ]
+        if attachment_types:
+            to_save["attachment_types"] = [
+                {"type": a.type, "value": a.path or a.url}
+                for a in attachment_types
+                if (a.path or a.url)
+            ]
         if options:
             # Need to validate and convert their types first
             model = get_model(model_id or get_default_model())
@@ -431,9 +576,17 @@ def prompt(
         # Cannot be used with system
         if system:
             raise click.ClickException("Cannot use -t/--template and --system together")
-        template_obj = load_template(template)
+        try:
+            template_obj = load_template(template)
+        except LoadTemplateError as ex:
+            raise click.ClickException(str(ex))
         extract = template_obj.extract
         extract_last = template_obj.extract_last
+        # Combine with template fragments/system_fragments
+        if template_obj.fragments:
+            fragments = [*template_obj.fragments, *fragments]
+        if template_obj.system_fragments:
+            system_fragments = [*template_obj.system_fragments, *system_fragments]
         if template_obj.schema_object:
             schema = template_obj.schema_object
         input_ = ""
@@ -450,13 +603,25 @@ def prompt(
         try:
             template_prompt, system = template_obj.evaluate(input_, params)
             if template_prompt:
-                # Over-ride user prompt only if the template provided one
-                prompt = template_prompt
+                # Combine with user prompt
+                if prompt and "input" not in template_obj.vars():
+                    prompt = template_prompt + "\n" + prompt
+                else:
+                    prompt = template_prompt
         except Template.MissingVariables as ex:
             raise click.ClickException(str(ex))
         if model_id is None and template_obj.model:
             model_id = template_obj.model
-
+        # Merge in any attachments
+        if template_obj.attachments:
+            attachments = [
+                resolve_attachment(a) for a in template_obj.attachments
+            ] + list(attachments)
+        if template_obj.attachment_types:
+            attachment_types = [
+                resolve_attachment_with_type(at.value, at.type)
+                for at in template_obj.attachment_types
+            ] + list(attachment_types)
     if extract or extract_last:
         no_stream = True
 
@@ -521,6 +686,12 @@ def prompt(
     prompt = read_prompt()
     response = None
 
+    try:
+        fragments = resolve_fragments(db, fragments)
+        system_fragments = resolve_fragments(db, system_fragments)
+    except FragmentNotFound as ex:
+        raise click.ClickException(str(ex))
+
     prompt_method = model.prompt
     if conversation:
         prompt_method = conversation.prompt
@@ -535,6 +706,8 @@ def prompt(
                         attachments=resolved_attachments,
                         system=system,
                         schema=schema,
+                        fragments=fragments,
+                        system_fragments=system_fragments,
                         **kwargs,
                     )
                     async for chunk in response:
@@ -544,9 +717,11 @@ def prompt(
                 else:
                     response = prompt_method(
                         prompt,
+                        fragments=fragments,
                         attachments=resolved_attachments,
-                        system=system,
                         schema=schema,
+                        system=system,
+                        system_fragments=system_fragments,
                         **kwargs,
                     )
                     text = await response.text()
@@ -561,9 +736,11 @@ def prompt(
         else:
             response = prompt_method(
                 prompt,
+                fragments=fragments,
                 attachments=resolved_attachments,
                 system=system,
                 schema=schema,
+                system_fragments=system_fragments,
                 **kwargs,
             )
             if should_stream:
@@ -679,7 +856,10 @@ def chat(
         # Cannot be used with system
         if system:
             raise click.ClickException("Cannot use -t/--template and --system together")
-        template_obj = load_template(template)
+        try:
+            template_obj = load_template(template)
+        except LoadTemplateError as ex:
+            raise click.ClickException(str(ex))
         if model_id is None and template_obj.model:
             model_id = template_obj.model
 
@@ -905,6 +1085,22 @@ def logs_status():
     )
 
 
+@logs.command(name="backup")
+@click.argument("path", type=click.Path(dir_okay=True, writable=True))
+def backup(path):
+    "Backup your logs database to this file"
+    logs_path = logs_db_path()
+    path = pathlib.Path(path)
+    db = sqlite_utils.Database(logs_path)
+    try:
+        db.execute("vacuum into ?", [str(path)])
+    except Exception as ex:
+        raise click.ClickException(str(ex))
+    click.echo(
+        "Backed up {} to {}".format(_human_readable_size(path.stat().st_size), path)
+    )
+
+
 @logs.command(name="on")
 def logs_turn_on():
     "Turn on logging for all prompts"
@@ -998,6 +1194,13 @@ order by prompt_attachments."order"
 )
 @click.option("-m", "--model", help="Filter by model or model alias")
 @click.option("-q", "--query", help="Search for logs matching this string")
+@click.option(
+    "fragments",
+    "--fragment",
+    "-f",
+    help="Filter for prompts using these fragments",
+    multiple=True,
+)
 @schema_option
 @click.option(
     "--schema-multi",
@@ -1047,12 +1250,19 @@ order by prompt_attachments."order"
     is_flag=True,
     help="Output logs as JSON",
 )
+@click.option(
+    "--expand",
+    "-e",
+    is_flag=True,
+    help="Expand fragments to show their content",
+)
 def logs_list(
     count,
     path,
     database,
     model,
     query,
+    fragments,
     schema_input,
     schema_multi,
     data,
@@ -1070,8 +1280,9 @@ def logs_list(
     id_gt,
     id_gte,
     json_output,
+    expand,
 ):
-    "Show recent logged prompts and their responses"
+    "Show logged prompts and their responses"
     if database and not path:
         path = database
     path = pathlib.Path(path or logs_db_path())
@@ -1140,6 +1351,13 @@ def logs_list(
         "extra_where": "",
     }
     where_bits = []
+    sql_params = {
+        "model": model_id,
+        "query": query,
+        "conversation_id": conversation_id,
+        "id_gt": id_gt,
+        "id_gte": id_gte,
+    }
     if model_id:
         where_bits.append("responses.model = :model")
     if conversation_id:
@@ -1148,29 +1366,47 @@ def logs_list(
         where_bits.append("responses.id > :id_gt")
     if id_gte:
         where_bits.append("responses.id >= :id_gte")
+    if fragments:
+        # Resolve the fragments to their hashes
+        fragment_hashes = [
+            fragment.id() for fragment in resolve_fragments(db, fragments)
+        ]
+        exists_clauses = []
+
+        for i, fragment_hash in enumerate(fragment_hashes):
+            exists_clause = f"""
+            exists (
+                select 1 from prompt_fragments
+                where prompt_fragments.response_id = responses.id
+                and prompt_fragments.fragment_id in (
+                    select fragments.id from fragments
+                    where hash = :f{i}
+                )
+                union
+                select 1 from system_fragments
+                where system_fragments.response_id = responses.id
+                and system_fragments.fragment_id in (
+                    select fragments.id from fragments
+                    where hash = :f{i}
+                )
+            )
+            """
+            exists_clauses.append(exists_clause)
+            sql_params["f{}".format(i)] = fragment_hash
+
+        where_bits.append(" AND ".join(exists_clauses))
     schema_id = None
     if schema:
         schema_id = make_schema_id(schema)[0]
         where_bits.append("responses.schema_id = :schema_id")
+        sql_params["schema_id"] = schema_id
 
     if where_bits:
         where_ = " and " if query else " where "
         sql_format["extra_where"] = where_ + " and ".join(where_bits)
 
     final_sql = sql.format(**sql_format)
-    rows = list(
-        db.query(
-            final_sql,
-            {
-                "model": model_id,
-                "query": query,
-                "conversation_id": conversation_id,
-                "schema_id": schema_id,
-                "id_gt": id_gt,
-                "id_gte": id_gte,
-            },
-        )
-    )
+    rows = list(db.query(final_sql, sql_params))
 
     # Reverse the order - we do this because we 'order by id desc limit 3' to get the
     # 3 most recent results, but we still want to display them in chronological order
@@ -1184,6 +1420,36 @@ def logs_list(
     attachments_by_id = {}
     for attachment in attachments:
         attachments_by_id.setdefault(attachment["response_id"], []).append(attachment)
+
+    FRAGMENTS_SQL = """
+    select
+        {table}.response_id,
+        fragments.hash,
+        fragments.id as fragment_id,
+        fragments.content,
+        (
+            select json_group_array(fragment_aliases.alias)
+            from fragment_aliases
+            where fragment_aliases.fragment_id = fragments.id
+        ) as aliases
+    from {table}
+    join fragments on {table}.fragment_id = fragments.id
+    where {table}.response_id in ({placeholders})
+    order by {table}."order"
+    """
+
+    # Fetch any prompt or system prompt fragments
+    prompt_fragments_by_id = {}
+    system_fragments_by_id = {}
+    for table, dictionary in (
+        ("prompt_fragments", prompt_fragments_by_id),
+        ("system_fragments", system_fragments_by_id),
+    ):
+        for fragment in db.query(
+            FRAGMENTS_SQL.format(placeholders=",".join("?" * len(ids)), table=table),
+            ids,
+        ):
+            dictionary.setdefault(fragment["response_id"], []).append(fragment)
 
     if data or data_array or data_key or data_ids:
         # Special case for --data to output valid JSON
@@ -1216,6 +1482,24 @@ def logs_list(
         if truncate:
             row["prompt"] = truncate_string(row["prompt"] or "")
             row["response"] = truncate_string(row["response"] or "")
+        # Add prompt and system fragments
+        for key in ("prompt_fragments", "system_fragments"):
+            row[key] = [
+                {
+                    "hash": fragment["hash"],
+                    "content": (
+                        fragment["content"]
+                        if expand
+                        else truncate_string(fragment["content"])
+                    ),
+                    "aliases": json.loads(fragment["aliases"]),
+                }
+                for fragment in (
+                    prompt_fragments_by_id.get(row["id"], [])
+                    if key == "prompt_fragments"
+                    else system_fragments_by_id.get(row["id"], [])
+                )
+            ]
         # Either decode or remove all JSON keys
         keys = list(row.keys())
         for key in keys:
@@ -1249,6 +1533,25 @@ def logs_list(
         click.echo(output)
     else:
         # Output neatly formatted human-readable logs
+        def _display_fragments(fragments, title):
+            if not fragments:
+                return
+            if not expand:
+                content = "\n".join(
+                    ["- {}".format(fragment["hash"]) for fragment in fragments]
+                )
+            else:
+                # <details><summary> for each one
+                bits = []
+                for fragment in fragments:
+                    bits.append(
+                        "<details><summary>{}</summary>\n{}\n</details>".format(
+                            fragment["hash"], maybe_fenced_code(fragment["content"])
+                        )
+                    )
+                content = "\n".join(bits)
+            click.echo(f"\n### {title}\n\n{content}")
+
         current_system = None
         should_show_conversation = True
         for row in rows:
@@ -1280,6 +1583,8 @@ def logs_list(
                             details["url"] = attachment["url"]
                         items.append(details)
                     obj["attachments"] = items
+                for key in ("prompt_fragments", "system_fragments"):
+                    obj[key] = [fragment["hash"] for fragment in row[key]]
                 if usage and (row["input_tokens"] or row["output_tokens"]):
                     usage_details = {
                         "input": row["input_tokens"],
@@ -1290,6 +1595,7 @@ def logs_list(
                     obj["usage"] = usage_details
                 click.echo(yaml.dump([obj], sort_keys=False).strip())
                 continue
+            # Not short, output Markdown
             click.echo(
                 "# {}{}\n{}".format(
                     row["datetime_utc"].split(".")[0],
@@ -1311,10 +1617,12 @@ def logs_list(
             if conversation_id:
                 should_show_conversation = False
             click.echo("## Prompt\n\n{}".format(row["prompt"] or "-- none --"))
+            _display_fragments(row["prompt_fragments"], "Prompt fragments")
             if row["system"] != current_system:
                 if row["system"] is not None:
                     click.echo("\n## System\n\n{}".format(row["system"]))
                 current_system = row["system"]
+            _display_fragments(row["system_fragments"], "System fragments")
             if row["schema_json"]:
                 click.echo(
                     "\n## Schema\n\n```json\n{}\n```".format(
@@ -1496,7 +1804,11 @@ def templates_list():
     pairs = []
     for file in path.glob("*.yaml"):
         name = file.stem
-        template = load_template(name)
+        try:
+            template = load_template(name)
+        except LoadTemplateError:
+            # Skip invalid templates
+            continue
         text = []
         if template.system:
             text.append(f"system: {template.system}")
@@ -1803,6 +2115,158 @@ def aliases_remove(alias):
 def aliases_path():
     "Output the path to the aliases.json file"
     click.echo(user_dir() / "aliases.json")
+
+
+@cli.group(
+    cls=DefaultGroup,
+    default="list",
+    default_if_no_args=True,
+)
+def fragments():
+    """
+    Manage fragments that are stored in the database
+
+    Fragments are reusable snippets of text that are shared across multiple prompts.
+    """
+
+
+@fragments.command(name="list")
+@click.option(
+    "queries",
+    "-q",
+    "--query",
+    multiple=True,
+    help="Search for fragments matching these strings",
+)
+@click.option("--aliases", is_flag=True, help="Show only fragments with aliases")
+@click.option("json_", "--json", is_flag=True, help="Output as JSON")
+def fragments_list(queries, aliases, json_):
+    "List current fragments"
+    db = sqlite_utils.Database(logs_db_path())
+    migrate(db)
+    params = {}
+    param_count = 0
+    where_bits = []
+    if aliases:
+        where_bits.append("fragment_aliases.alias is not null")
+    for q in queries:
+        param_count += 1
+        p = f"p{param_count}"
+        params[p] = q
+        where_bits.append(
+            f"""
+            (fragments.hash = :{p} or fragment_aliases.alias = :{p}
+            or fragments.source like '%' || :{p} || '%'
+            or fragments.content like '%' || :{p} || '%')
+        """
+        )
+    where = "\n      and\n  ".join(where_bits)
+    if where:
+        where = " where " + where
+    sql = """
+    select
+        fragments.hash,
+        json_group_array(fragment_aliases.alias) filter (
+            where
+            fragment_aliases.alias is not null
+        ) as aliases,
+        fragments.datetime_utc,
+        fragments.source,
+        fragments.content
+    from
+        fragments
+    left join
+        fragment_aliases on fragment_aliases.fragment_id = fragments.id
+    {where}
+    group by
+        fragments.id, fragments.hash, fragments.content, fragments.datetime_utc, fragments.source;
+    """.format(
+        where=where
+    )
+    results = list(db.query(sql, params))
+    for result in results:
+        result["aliases"] = json.loads(result["aliases"])
+    if json_:
+        click.echo(json.dumps(results, indent=4))
+    else:
+        yaml.add_representer(
+            str,
+            lambda dumper, data: dumper.represent_scalar(
+                "tag:yaml.org,2002:str", data, style="|" if "\n" in data else None
+            ),
+        )
+        for result in results:
+            result["content"] = truncate_string(result["content"])
+            click.echo(yaml.dump([result], sort_keys=False, width=sys.maxsize).strip())
+
+
+@fragments.command(name="set")
+@click.argument("alias", callback=validate_fragment_alias)
+@click.argument("fragment")
+def fragments_set(alias, fragment):
+    """
+    Set an alias for a fragment
+
+    Accepts an alias and a file path, URL, hash or '-' for stdin
+
+    Example usage:
+
+    \b
+        llm fragments set mydocs ./docs.md
+    """
+    db = sqlite_utils.Database(logs_db_path())
+    migrate(db)
+    try:
+        resolved = resolve_fragments(db, [fragment])[0]
+    except FragmentNotFound as ex:
+        raise click.ClickException(str(ex))
+    migrate(db)
+    alias_sql = """
+    insert into fragment_aliases (alias, fragment_id)
+    values (:alias, :fragment_id)
+    on conflict(alias) do update set
+        fragment_id = excluded.fragment_id;
+    """
+    with db.conn:
+        fragment_id = ensure_fragment(db, resolved)
+        db.conn.execute(alias_sql, {"alias": alias, "fragment_id": fragment_id})
+
+
+@fragments.command(name="show")
+@click.argument("alias_or_hash")
+def fragments_show(alias_or_hash):
+    """
+    Display the fragment stored under an alias or hash
+
+    \b
+        llm fragments show mydocs
+    """
+    db = sqlite_utils.Database(logs_db_path())
+    migrate(db)
+    try:
+        resolved = resolve_fragments(db, [alias_or_hash])[0]
+    except FragmentNotFound as ex:
+        raise click.ClickException(str(ex))
+    click.echo(resolved)
+
+
+@fragments.command(name="remove")
+@click.argument("alias", callback=validate_fragment_alias)
+def fragments_remove(alias):
+    """
+    Remove a fragment alias
+
+    Example usage:
+
+    \b
+        llm fragments remove docs
+    """
+    db = sqlite_utils.Database(logs_db_path())
+    migrate(db)
+    with db.conn:
+        db.conn.execute(
+            "delete from fragment_aliases where alias = :alias", {"alias": alias}
+        )
 
 
 @cli.command(name="plugins")
@@ -2568,48 +3032,6 @@ def logs_db_path():
     return user_dir() / "logs.db"
 
 
-def _parse_yaml_template(name, content):
-    try:
-        loaded = yaml.safe_load(content)
-    except yaml.YAMLError as ex:
-        raise click.ClickException("Invalid YAML: {}".format(str(ex)))
-    if isinstance(loaded, str):
-        return Template(name=name, prompt=loaded)
-    loaded["name"] = name
-    try:
-        return Template(**loaded)
-    except pydantic.ValidationError as ex:
-        msg = "A validation error occurred:\n"
-        msg += render_errors(ex.errors())
-        raise click.ClickException(msg)
-
-
-def load_template(name):
-    if name.startswith("https://") or name.startswith("http://"):
-        response = httpx.get(name)
-        response.raise_for_status()
-        return _parse_yaml_template(name, response.text)
-
-    if ":" in name:
-        prefix, rest = name.split(":", 1)
-        loaders = get_template_loaders()
-        if prefix not in loaders:
-            raise click.ClickException("Unknown template prefix: {}".format(prefix))
-        loader = loaders[prefix]
-        try:
-            return loader(rest)
-        except Exception as ex:
-            raise click.ClickException(
-                "Could not load template {}: {}".format(name, ex)
-            )
-
-    path = template_dir() / f"{name}.yaml"
-    if not path.exists():
-        raise click.ClickException(f"Invalid template: {name}")
-    content = path.read_text()
-    return _parse_yaml_template(name, content)
-
-
 def get_history(chat_id):
     if chat_id is None:
         return None, []
@@ -2753,3 +3175,57 @@ def clear_model_option(model_id: str, key: str) -> None:
             del options[model_id]
 
     path.write_text(json.dumps(options, indent=2))
+
+
+class LoadTemplateError(ValueError):
+    pass
+
+
+def _parse_yaml_template(name, content):
+    try:
+        loaded = yaml.safe_load(content)
+    except yaml.YAMLError as ex:
+        raise LoadTemplateError("Invalid YAML: {}".format(str(ex)))
+    if isinstance(loaded, str):
+        return Template(name=name, prompt=loaded)
+    loaded["name"] = name
+    try:
+        return Template(**loaded)
+    except pydantic.ValidationError as ex:
+        msg = "A validation error occurred:\n"
+        msg += render_errors(ex.errors())
+        raise LoadTemplateError(msg)
+
+
+def load_template(name: str) -> Template:
+    "Load template, or raise LoadTemplateError(msg)"
+    if name.startswith("https://") or name.startswith("http://"):
+        response = httpx.get(name)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as ex:
+            raise LoadTemplateError("Could not load template {}: {}".format(name, ex))
+        return _parse_yaml_template(name, response.text)
+
+    if has_plugin_prefix(name):
+        prefix, rest = name.split(":", 1)
+        loaders = get_template_loaders()
+        if prefix not in loaders:
+            raise LoadTemplateError("Unknown template prefix: {}".format(prefix))
+        loader = loaders[prefix]
+        try:
+            return loader(rest)
+        except Exception as ex:
+            raise LoadTemplateError("Could not load template {}: {}".format(name, ex))
+
+    # First try local file
+    potential_path = pathlib.Path(name)
+    if potential_path.exists():
+        path = potential_path
+    else:
+        # Look for in template_dir()
+        path = template_dir() / f"{name}.yaml"
+    if not path.exists():
+        raise LoadTemplateError(f"Invalid template: {name}")
+    content = path.read_text()
+    return _parse_yaml_template(name, content)
