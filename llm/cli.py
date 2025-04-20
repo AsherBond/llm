@@ -292,7 +292,7 @@ def cli():
 @cli.command(name="prompt")
 @click.argument("prompt", required=False)
 @click.option("-s", "--system", help="System prompt to use")
-@click.option("model_id", "-m", "--model", help="Model to use")
+@click.option("model_id", "-m", "--model", help="Model to use", envvar="LLM_MODEL")
 @click.option(
     "-d",
     "--database",
@@ -574,8 +574,6 @@ def prompt(
     if template:
         params = dict(param)
         # Cannot be used with system
-        if system:
-            raise click.ClickException("Cannot use -t/--template and --system together")
         try:
             template_obj = load_template(template)
         except LoadTemplateError as ex:
@@ -601,13 +599,15 @@ def prompt(
         if "input" in template_obj.vars():
             input_ = read_prompt()
         try:
-            template_prompt, system = template_obj.evaluate(input_, params)
+            template_prompt, template_system = template_obj.evaluate(input_, params)
             if template_prompt:
                 # Combine with user prompt
                 if prompt and "input" not in template_obj.vars():
                     prompt = template_prompt + "\n" + prompt
                 else:
                     prompt = template_prompt
+            if template_system and not system:
+                system = template_system
         except Template.MissingVariables as ex:
             raise click.ClickException(str(ex))
         if model_id is None and template_obj.model:
@@ -783,7 +783,7 @@ def prompt(
 
 @cli.command()
 @click.option("-s", "--system", help="System prompt to use")
-@click.option("model_id", "-m", "--model", help="Model to use")
+@click.option("model_id", "-m", "--model", help="Model to use", envvar="LLM_MODEL")
 @click.option(
     "_continue",
     "-c",
@@ -853,9 +853,6 @@ def chat(
     template_obj = None
     if template:
         params = dict(param)
-        # Cannot be used with system
-        if system:
-            raise click.ClickException("Cannot use -t/--template and --system together")
         try:
             template_obj = load_template(template)
         except LoadTemplateError as ex:
@@ -929,9 +926,16 @@ def chat(
                 continue
         if template_obj:
             try:
-                prompt, system = template_obj.evaluate(prompt, params)
+                template_prompt, template_system = template_obj.evaluate(prompt, params)
             except Template.MissingVariables as ex:
                 raise click.ClickException(str(ex))
+            if template_system and not system:
+                system = template_system
+            if template_prompt:
+                new_prompt = template_prompt
+                if prompt:
+                    new_prompt += "\n" + prompt
+                prompt = new_prompt
         if prompt.strip() in ("exit", "quit"):
             break
         response = conversation.prompt(prompt, system=system, **kwargs)
@@ -1720,13 +1724,17 @@ def models_list(options, async_, schemas, query, model_ids):
                 continue
         if schemas and not model_with_aliases.model.supports_schema:
             continue
-        extra = ""
+        extra_info = []
         if model_with_aliases.aliases:
-            extra = " (aliases: {})".format(", ".join(model_with_aliases.aliases))
+            extra_info.append(
+                "aliases: {}".format(", ".join(model_with_aliases.aliases))
+            )
         model = (
             model_with_aliases.model if not async_ else model_with_aliases.async_model
         )
-        output = str(model) + extra
+        output = str(model)
+        if extra_info:
+            output += " ({})".format(", ".join(extra_info))
         if options and model.Options.model_json_schema()["properties"]:
             output += "\n  Options:"
             for name, field in model.Options.model_json_schema()["properties"].items():
@@ -1768,6 +1776,12 @@ def models_list(options, async_, schemas, query, model_ids):
             output += "\n  Features:\n{}".format(
                 "\n".join("  - {}".format(feature) for feature in features)
             )
+        if options and hasattr(model, "needs_key") and model.needs_key:
+            output += "\n  Keys:"
+            if hasattr(model, "needs_key") and model.needs_key:
+                output += "\n    key: {}".format(model.needs_key)
+            if hasattr(model, "key_env_var") and model.key_env_var:
+                output += "\n    env_var: {}".format(model.key_env_var)
         click.echo(output)
     if not query and not options and not schemas and not model_ids:
         click.echo(f"Default: {get_default_model()}")
@@ -2338,7 +2352,9 @@ def uninstall(packages, yes):
     type=click.Path(exists=True, readable=True, allow_dash=True),
     help="File to embed",
 )
-@click.option("-m", "--model", help="Embedding model to use")
+@click.option(
+    "-m", "--model", help="Embedding model to use", envvar="LLM_EMBEDDING_MODEL"
+)
 @click.option("--store", is_flag=True, help="Store the text itself in the database")
 @click.option(
     "-d",
@@ -2480,7 +2496,9 @@ def embed(
     "--batch-size", type=int, help="Batch size to use when running embeddings"
 )
 @click.option("--prefix", help="Prefix to add to the IDs", default="")
-@click.option("-m", "--model", help="Embedding model to use")
+@click.option(
+    "-m", "--model", help="Embedding model to use", envvar="LLM_EMBEDDING_MODEL"
+)
 @click.option(
     "--prepend",
     help="Prepend this string to all content before embedding",
@@ -3207,7 +3225,9 @@ def load_template(name: str) -> Template:
             raise LoadTemplateError("Could not load template {}: {}".format(name, ex))
         return _parse_yaml_template(name, response.text)
 
-    if has_plugin_prefix(name):
+    potential_path = pathlib.Path(name)
+
+    if has_plugin_prefix(name) and not potential_path.exists():
         prefix, rest = name.split(":", 1)
         loaders = get_template_loaders()
         if prefix not in loaders:
@@ -3218,12 +3238,11 @@ def load_template(name: str) -> Template:
         except Exception as ex:
             raise LoadTemplateError("Could not load template {}: {}".format(name, ex))
 
-    # First try local file
-    potential_path = pathlib.Path(name)
+    # Try local file
     if potential_path.exists():
         path = potential_path
     else:
-        # Look for in template_dir()
+        # Look for template in template_dir()
         path = template_dir() / f"{name}.yaml"
     if not path.exists():
         raise LoadTemplateError(f"Invalid template: {name}")

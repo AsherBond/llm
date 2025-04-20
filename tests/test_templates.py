@@ -18,6 +18,7 @@ import yaml
         ("$one and $two", None, None, {}, None, None, "Missing variables: one, two"),
         ("$one and $two", None, None, {"one": 1, "two": 2}, "1 and 2", None, None),
         ("$one and $two", None, {"one": 1}, {"two": 2}, "1 and 2", None, None),
+        ("$one and $$2", None, None, {"one": 1}, "1 and $2", None, None),
         (
             "$one and $two",
             None,
@@ -210,13 +211,17 @@ def test_templates_error_on_missing_schema(templates_path):
             None,
             None,
         ),
+        # -s system prompt should over-ride template system prompt
         pytest.param(
             "boo",
             "Input text",
-            ["-s", "s"],
+            ["-s", "custom system"],
+            "gpt-4o-mini",
+            [
+                {"role": "system", "content": "custom system"},
+                {"role": "user", "content": "boo\nInput text"},
+            ],
             None,
-            None,
-            "Error: Cannot use -t/--template and --system together",
             None,
             marks=pytest.mark.httpx_mock(),
         ),
@@ -368,5 +373,5 @@ def test_execute_prompt_from_template_path():
             ["-t", str(path), "-m", "echo"],
             catch_exceptions=False,
         )
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         assert result.output.strip() == "system:\nsystem\n\nprompt:\nprompt"

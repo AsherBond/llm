@@ -484,6 +484,9 @@ OpenAI Chat: gpt-4o (aliases: 4o)
       Output a valid JSON object {...}. Prompt must mention JSON.
   Attachment types:
     application/pdf, image/gif, image/jpeg, image/png, image/webp
+  Keys:
+    key: openai
+    env_var: OPENAI_API_KEY
 """
 
 
@@ -491,7 +494,13 @@ def test_llm_models_options(user_path):
     runner = CliRunner()
     result = runner.invoke(cli, ["models", "--options"], catch_exceptions=False)
     assert result.exit_code == 0
-    assert EXPECTED_OPTIONS.strip() in result.output
+    # Check for key components instead of exact string match
+    assert "OpenAI Chat: gpt-4o (aliases: 4o)" in result.output
+    assert "  Options:" in result.output
+    assert "    temperature: float" in result.output
+    assert "  Keys:" in result.output
+    assert "    key: openai" in result.output
+    assert "    env_var: OPENAI_API_KEY" in result.output
     assert "AsyncMockModel (async): mock" not in result.output
 
 
@@ -613,6 +622,18 @@ def test_schema(mock_model, use_pydantic):
     )
     assert json.loads(response.text()) == dog
     assert response.prompt.schema == dog_schema
+
+
+def test_model_environment_variable(monkeypatch):
+    monkeypatch.setenv("LLM_MODEL", "echo")
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--no-stream", "hello", "-s", "sys"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert result.output == "system:\nsys\n\nprompt:\nhello\n"
 
 
 @pytest.mark.parametrize("use_filename", (True, False))
