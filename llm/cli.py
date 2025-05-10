@@ -89,13 +89,13 @@ def validate_fragment_alias(ctx, param, value):
 
 
 def resolve_fragments(
-    db: sqlite_utils.Database, fragments: Iterable[str]
-) -> List[Fragment]:
+    db: sqlite_utils.Database, fragments: Iterable[str], allow_attachments: bool = False
+) -> List[Union[Fragment, Attachment]]:
     """
-    Resolve fragments into a list of (content, source) tuples
+    Resolve fragment strings into a mixed of llm.Fragment() and llm.Attachment() objects.
     """
 
-    def _load_by_alias(fragment):
+    def _load_by_alias(fragment: str) -> Tuple[Optional[str], Optional[str]]:
         rows = list(
             db.query(
                 """
@@ -111,8 +111,8 @@ def resolve_fragments(
             return row["content"], row["source"]
         return None, None
 
-    # These can be URLs or paths or plugin references
-    resolved = []
+    # The fragment strings could be URLs or paths or plugin references
+    resolved: List[Union[Fragment, Attachment]] = []
     for fragment in fragments:
         if fragment.startswith("http://") or fragment.startswith("https://"):
             client = httpx.Client(follow_redirects=True, max_redirects=3)
@@ -131,6 +131,14 @@ def resolve_fragments(
                 result = loader(rest)
                 if not isinstance(result, list):
                     result = [result]
+                if not allow_attachments and any(
+                    isinstance(r, Attachment) for r in result
+                ):
+                    raise FragmentNotFound(
+                        "Fragment loader {} returned a disallowed attachment".format(
+                            prefix
+                        )
+                    )
                 resolved.extend(result)
             except Exception as ex:
                 raise FragmentNotFound(
@@ -629,7 +637,9 @@ def prompt(
     if conversation_id or _continue:
         # Load the conversation - loads most recent if no ID provided
         try:
-            conversation = load_conversation(conversation_id, async_=async_)
+            conversation = load_conversation(
+                conversation_id, async_=async_, database=database
+            )
         except UnknownModelError as ex:
             raise click.ClickException(str(ex))
 
@@ -667,7 +677,7 @@ def prompt(
             raise click.ClickException(render_errors(ex.errors()))
 
     # Add on any default model options
-    default_options = get_model_options(model_id)
+    default_options = get_model_options(model.model_id)
     for key_, value in default_options.items():
         if key_ not in validated_options:
             validated_options[key_] = value
@@ -687,8 +697,20 @@ def prompt(
     response = None
 
     try:
-        fragments = resolve_fragments(db, fragments)
-        system_fragments = resolve_fragments(db, system_fragments)
+        fragments_and_attachments = resolve_fragments(
+            db, fragments, allow_attachments=True
+        )
+        resolved_fragments = [
+            fragment
+            for fragment in fragments_and_attachments
+            if isinstance(fragment, Fragment)
+        ]
+        resolved_attachments.extend(
+            attachment
+            for attachment in fragments_and_attachments
+            if isinstance(attachment, Attachment)
+        )
+        resolved_system_fragments = resolve_fragments(db, system_fragments)
     except FragmentNotFound as ex:
         raise click.ClickException(str(ex))
 
@@ -706,8 +728,8 @@ def prompt(
                         attachments=resolved_attachments,
                         system=system,
                         schema=schema,
-                        fragments=fragments,
-                        system_fragments=system_fragments,
+                        fragments=resolved_fragments,
+                        system_fragments=resolved_system_fragments,
                         **kwargs,
                     )
                     async for chunk in response:
@@ -717,11 +739,11 @@ def prompt(
                 else:
                     response = prompt_method(
                         prompt,
-                        fragments=fragments,
+                        fragments=resolved_fragments,
                         attachments=resolved_attachments,
                         schema=schema,
                         system=system,
-                        system_fragments=system_fragments,
+                        system_fragments=resolved_system_fragments,
                         **kwargs,
                     )
                     text = await response.text()
@@ -736,11 +758,11 @@ def prompt(
         else:
             response = prompt_method(
                 prompt,
-                fragments=fragments,
+                fragments=resolved_fragments,
                 attachments=resolved_attachments,
                 system=system,
                 schema=schema,
-                system_fragments=system_fragments,
+                system_fragments=resolved_system_fragments,
                 **kwargs,
             )
             if should_stream:
@@ -814,6 +836,12 @@ def prompt(
     multiple=True,
     help="key/value options for the model",
 )
+@click.option(
+    "-d",
+    "--database",
+    type=click.Path(readable=True, dir_okay=False),
+    help="Path to log database",
+)
 @click.option("--no-stream", is_flag=True, help="Do not stream output")
 @click.option("--key", help="API key to use")
 def chat(
@@ -826,6 +854,7 @@ def chat(
     options,
     no_stream,
     key,
+    database,
 ):
     """
     Hold an ongoing chat with a model.
@@ -837,7 +866,7 @@ def chat(
     else:
         readline.parse_and_bind("bind -x '\\e[D: backward-char'")
         readline.parse_and_bind("bind -x '\\e[C: forward-char'")
-    log_path = logs_db_path()
+    log_path = pathlib.Path(database) if database else logs_db_path()
     (log_path.parent).mkdir(parents=True, exist_ok=True)
     db = sqlite_utils.Database(log_path)
     migrate(db)
@@ -846,7 +875,7 @@ def chat(
     if conversation_id or _continue:
         # Load the conversation - loads most recent if no ID provided
         try:
-            conversation = load_conversation(conversation_id)
+            conversation = load_conversation(conversation_id, database=database)
         except UnknownModelError as ex:
             raise click.ClickException(str(ex))
 
@@ -905,6 +934,7 @@ def chat(
     click.echo("Chatting with {}".format(model.model_id))
     click.echo("Type 'exit' or 'quit' to exit")
     click.echo("Type '!multi' to enter multiple lines, then '!end' to finish")
+    click.echo("Type '!edit' to open your default editor and modify the prompt")
     in_multi = False
     accumulated = []
     end_token = "!end"
@@ -916,6 +946,15 @@ def chat(
             if len(bits) > 1:
                 end_token = "!end {}".format(" ".join(bits[1:]))
             continue
+        if prompt.strip() == "!edit":
+            edited_prompt = click.edit()
+            if edited_prompt is None:
+                click.echo("Editor closed without saving.", err=True)
+                continue
+            prompt = edited_prompt.strip()
+            if not prompt:
+                continue
+            click.echo(prompt)
         if in_multi:
             if prompt.strip() == end_token:
                 prompt = "\n".join(accumulated)
@@ -949,9 +988,12 @@ def chat(
 
 
 def load_conversation(
-    conversation_id: Optional[str], async_=False
+    conversation_id: Optional[str],
+    async_=False,
+    database=None,
 ) -> Optional[_BaseConversation]:
-    db = sqlite_utils.Database(logs_db_path())
+    log_path = pathlib.Path(database) if database else logs_db_path()
+    db = sqlite_utils.Database(log_path)
     migrate(db)
     if conversation_id is None:
         # Return the most recent conversation, or None if there are none
@@ -2193,7 +2235,8 @@ def fragments_list(queries, aliases, json_):
         fragment_aliases on fragment_aliases.fragment_id = fragments.id
     {where}
     group by
-        fragments.id, fragments.hash, fragments.content, fragments.datetime_utc, fragments.source;
+        fragments.id, fragments.hash, fragments.content, fragments.datetime_utc, fragments.source
+    order by fragments.datetime_utc
     """.format(
         where=where
     )
