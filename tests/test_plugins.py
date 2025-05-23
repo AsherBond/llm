@@ -1,6 +1,7 @@
 from click.testing import CliRunner
 import click
 import importlib
+import json
 import llm
 from llm import cli, hookimpl, plugins, get_template_loaders, get_fragment_loaders
 import textwrap
@@ -143,8 +144,13 @@ def test_register_fragment_loaders(logs_db, httpx_mock):
             cli.cli, ["-m", "echo", "-f", "three:x"], catch_exceptions=False
         )
         assert result.exit_code == 0
-        expected = "prompt:\n" "one:x\n" "two:x\n" "three:x\n"
-        assert expected in result.output
+        assert json.loads(result.output) == {
+            "prompt": "one:x\ntwo:x\nthree:x",
+            "system": "",
+            "attachments": [],
+            "stream": True,
+            "previous": [],
+        }
         # And the llm fragments loaders command:
         result2 = runner.invoke(cli.cli, ["fragments", "loaders"])
         assert result2.exit_code == 0
@@ -187,4 +193,130 @@ def test_register_fragment_loaders(logs_db, httpx_mock):
         {"content": "one:x", "source": "one"},
         {"content": "two:x", "source": "two"},
         {"content": "three:x", "source": "three"},
+    ]
+
+
+def test_register_tools(tmpdir):
+    def upper(text: str) -> str:
+        """Convert text to uppercase."""
+        return text.upper()
+
+    def count_character_in_word(text: str, character: str) -> int:
+        """Count the number of occurrences of a character in a word."""
+        return text.count(character)
+
+    class ToolsPlugin:
+        __name__ = "ToolsPlugin"
+
+        @hookimpl
+        def register_tools(self, register):
+            register(llm.Tool.function(upper))
+            register(count_character_in_word, name="count_chars")
+
+    try:
+        plugins.pm.register(ToolsPlugin(), name="ToolsPlugin")
+        tools = llm.get_tools()
+        assert tools == {
+            "upper": llm.Tool(
+                name="upper",
+                description="Convert text to uppercase.",
+                input_schema={
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "type": "object",
+                },
+                implementation=upper,
+            ),
+            "count_chars": llm.Tool(
+                name="count_chars",
+                description="Count the number of occurrences of a character in a word.",
+                input_schema={
+                    "properties": {
+                        "text": {"type": "string"},
+                        "character": {"type": "string"},
+                    },
+                    "required": ["text", "character"],
+                    "type": "object",
+                },
+                implementation=count_character_in_word,
+            ),
+        }
+        # Test the CLI command
+        runner = CliRunner()
+        result = runner.invoke(cli.cli, ["tools", "list"])
+        assert result.exit_code == 0
+        assert result.output == (
+            "upper(text: str) -> str\n"
+            "  Convert text to uppercase.\n"
+            "count_chars(text: str, character: str) -> int\n"
+            "  Count the number of occurrences of a character in a word.\n"
+        )
+        # And --json
+        result2 = runner.invoke(cli.cli, ["tools", "list", "--json"])
+        assert result2.exit_code == 0
+        assert json.loads(result2.output) == {
+            "upper": {
+                "description": "Convert text to uppercase.",
+                "arguments": {
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "type": "object",
+                },
+            },
+            "count_chars": {
+                "description": "Count the number of occurrences of a character in a word.",
+                "arguments": {
+                    "properties": {
+                        "text": {"type": "string"},
+                        "character": {"type": "string"},
+                    },
+                    "required": ["text", "character"],
+                    "type": "object",
+                },
+            },
+        }
+        # And test the --tools option
+        functions_path = str(tmpdir / "functions.py")
+        with open(functions_path, "w") as fp:
+            fp.write("def example(s: str, i: int):\n    return s + '-' + str(i)")
+        result3 = runner.invoke(
+            cli.cli,
+            [
+                "tools",
+                "--functions",
+                "def reverse(s: str): return s[::-1]",
+                "--functions",
+                functions_path,
+            ],
+        )
+        assert result3.exit_code == 0
+        assert "reverse(s: str)" in result3.output
+        assert "example(s: str, i: int)" in result3.output
+    finally:
+        plugins.pm.unregister(name="ToolsPlugin")
+        assert llm.get_tools() == {}
+
+
+def test_plugins_command():
+    runner = CliRunner()
+    result = runner.invoke(cli.cli, ["plugins"])
+    assert result.exit_code == 0
+    expected = [
+        {"name": "EchoModelPlugin", "hooks": ["register_models"]},
+        {
+            "name": "MockModelsPlugin",
+            "hooks": ["register_embedding_models", "register_models"],
+        },
+    ]
+    actual = json.loads(result.output)
+    actual.sort(key=lambda p: p["name"])
+    assert actual == expected
+    # Test the --hook option
+    result2 = runner.invoke(cli.cli, ["plugins", "--hook", "register_embedding_models"])
+    assert result2.exit_code == 0
+    assert json.loads(result2.output) == [
+        {
+            "name": "MockModelsPlugin",
+            "hooks": ["register_embedding_models", "register_models"],
+        },
     ]

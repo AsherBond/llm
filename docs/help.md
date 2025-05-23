@@ -85,6 +85,7 @@ Commands:
   schemas       Manage stored schemas
   similar       Return top N similar IDs from a collection using cosine...
   templates     Manage stored prompt templates
+  tools         Manage tools that can be made available to LLMs
   uninstall     Uninstall Python packages from the LLM environment
 ```
 
@@ -125,6 +126,13 @@ Options:
   --at, --attachment-type <TEXT TEXT>...
                                   Attachment with explicit mimetype,
                                   --at image.jpg image/jpeg
+  -T, --tool TEXT                 Name of a tool to make available to the model
+  --functions TEXT                Python code block or file path defining
+                                  functions to register as tools
+  --td, --tools-debug             Show full details of tool executions
+  --ta, --tools-approve           Manually approve every tool execution
+  --cl, --chain-limit INTEGER     How many chained tool responses to allow,
+                                  default 5, set 0 for unlimited
   -o, --option <TEXT TEXT>...     key/value options for the model
   --schema TEXT                   JSON schema, filepath or ID
   --schema-multi TEXT             JSON schema to use for multiple results
@@ -165,6 +173,13 @@ Options:
   -d, --database FILE          Path to log database
   --no-stream                  Do not stream output
   --key TEXT                   API key to use
+  -T, --tool TEXT              Name of a tool to make available to the model
+  --functions TEXT             Python code block or file path defining functions
+                               to register as tools
+  --td, --tools-debug          Show full details of tool executions
+  --ta, --tools-approve        Manually approve every tool execution
+  --cl, --chain-limit INTEGER  How many chained tool responses to allow, default
+                               5, set 0 for unlimited
   --help                       Show this message and exit.
 ```
 
@@ -375,6 +390,7 @@ Options:
   --options         Show options for each model, if available
   --async           List async models
   --schemas         List models that support schemas
+  --tools           List models that support tools
   -q, --query TEXT  Search for models matching these strings
   -m, --model TEXT  Specific model IDs
   --help            Show this message and exit.
@@ -599,6 +615,34 @@ Options:
   --help   Show this message and exit.
 ```
 
+(help-tools)=
+### llm tools --help
+```
+Usage: llm tools [OPTIONS] COMMAND [ARGS]...
+
+  Manage tools that can be made available to LLMs
+
+Options:
+  --help  Show this message and exit.
+
+Commands:
+  list*  List available tools that have been provided by plugins
+```
+
+(help-tools-list)=
+#### llm tools list --help
+```
+Usage: llm tools list [OPTIONS]
+
+  List available tools that have been provided by plugins
+
+Options:
+  --json            Output as JSON
+  --functions TEXT  Python code block or file path defining functions to
+                    register as tools
+  --help            Show this message and exit.
+```
+
 (help-aliases)=
 ### llm aliases --help
 ```
@@ -774,8 +818,9 @@ Usage: llm plugins [OPTIONS]
   List installed plugins
 
 Options:
-  --all   Include built-in default plugins
-  --help  Show this message and exit.
+  --all        Include built-in default plugins
+  --hook TEXT  Filter for plugins that implement this hook
+  --help       Show this message and exit.
 ```
 
 (help-install)=
@@ -791,6 +836,7 @@ Options:
   --force-reinstall    Reinstall all packages even if they are already up-to-
                        date
   --no-cache-dir       Disable the cache
+  --pre                Include pre-release and development versions
   --help               Show this message and exit.
 ```
 
